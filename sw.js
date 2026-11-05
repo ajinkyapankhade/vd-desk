@@ -1,6 +1,6 @@
 /* VD Enterprise Desk — keeps the app openable without internet.
    Change VERSION whenever you upload a new index.html. */
-const VERSION = "vd-desk-v4";
+const VERSION = "vd-desk-v5";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {

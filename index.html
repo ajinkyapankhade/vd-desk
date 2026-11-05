@@ -2110,7 +2110,7 @@ function sync(interactive) {
       if (e.code === "auth") { AUTH.token = ""; setSync("signin"); }
       else if (e.code === "net") setSync("offline");
       else setSync("error", e.message || "Sync failed.");
-      if (interactive) toast(e.message || "Sync failed.", true);
+      if (interactive || (e.code !== "auth" && e.code !== "net")) toast("Google sync: " + (e.message || "failed"), true);
     } finally {
       syncing = null;
       if (syncAgain) { syncAgain = false; setTimeout(() => sync(false), 600); }
@@ -2211,9 +2211,9 @@ function syncBadge() {
 }
 function syncBanner() {
   const empty = !L.settings && !Object.keys(L.coll.clients).length && !Object.keys(L.coll.ratecard).length;
-  if (empty && L.email && S.sync.state !== "syncing") return `<div class="banner row">No records on this computer yet. <button class="btn sm primary" data-import>Import starting data</button><span class="muted">Pick “VD starting data.json”. Used the app on another computer? Press <a href="#" data-syncnow>Sync now</a> instead.</span></div>`;
   if (S.sync.state === "signin" && L.email) return `<div class="banner row">${L.dirty ? "Changes on this device aren't copied to Google yet." : "Not connected to Google — records added on your other devices won't show here until you sync."} <button class="btn sm primary" data-syncnow>Sign in &amp; sync</button></div>`;
   if (S.sync.state === "error") return `<div class="banner row">Couldn't sync with Google: ${esc(S.sync.msg)} — your work is safe on this computer. <button class="btn sm" data-syncnow>Try again</button></div>`;
+  if (empty && L.email && S.sync.state !== "syncing" && S.sync.state !== "signin") return `<div class="banner row">No records on this computer yet. <button class="btn sm primary" data-import>Import starting data</button><span class="muted">Pick “VD starting data.json”. Used the app on another computer? Press <a href="#" data-syncnow>Sync now</a> instead.</span></div>`;
   return "";
 }
 
