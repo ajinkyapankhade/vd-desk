@@ -234,6 +234,9 @@ table.lines .amt{text-align:right;font-variant-numeric:tabular-nums;padding-inli
 .paper .kv{display:grid;grid-template-columns:auto 1fr;gap:2px 12px}
 .paper .kv b{font-weight:600}
 .paper table{width:100%;border-collapse:collapse}
+.paper .items{table-layout:fixed}
+.paper .items td{overflow-wrap:anywhere;word-break:break-word}
+.paper .boxes>div,.paper .addr span,.paper .pay,.paper .lower>div{min-width:0;overflow-wrap:anywhere;word-break:break-word}
 .paper .items th{background:#111;color:#fff;font:700 10px/1.2 "Archivo",sans-serif;letter-spacing:.06em;text-transform:uppercase;padding:6px 6px;text-align:left}
 .paper .items td{padding:5px 6px;border-bottom:1px solid #ddd;vertical-align:top}
 .paper .items .r{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
@@ -252,6 +255,23 @@ table.lines .amt{text-align:right;font-variant-numeric:tabular-nums;padding-inli
 .paper .sign .for{font-weight:700;margin-bottom:46px}
 .paper .sign .by{border-top:1px solid #111;padding-top:3px}
 .paper .fine{font-size:10px;color:#666;text-align:center}
+.sheet-frame{display:flex;flex-direction:column;gap:24px}
+.paper.ph{height:1123px;min-height:0;overflow:hidden}
+.paper.ph .phhead{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;border-bottom:2px solid #111;padding-bottom:6px;font-size:11.5px}
+.paper.ph .phhead b.t{display:block;font:800 18px/1.1 "Archivo",sans-serif;letter-spacing:.05em;text-transform:uppercase}
+.paper.ph .phhead .r{text-align:right}
+.paper.ph .phgrid{display:grid;gap:12px}
+.paper.ph figure{margin:0;border:1px solid #bbb;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:0;overflow:hidden}
+.paper.ph .phbox{display:flex;align-items:center;justify-content:center;overflow:hidden}
+.paper.ph .phbox img{max-width:100%;width:auto;height:auto;display:block}
+.paper.ph .phmiss{color:#888;font-size:12px}
+.paper.ph figcaption{font-size:12px;text-align:center;min-height:18px;overflow-wrap:anywhere}
+.ph-thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:12px}
+.ph-thumbs:empty{display:none}
+.ph-t{border:1px solid var(--line);border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
+.ph-t .im{height:110px;display:flex;align-items:center;justify-content:center;background:var(--sunk);border-radius:6px;overflow:hidden;font-size:12px;color:var(--muted);text-align:center;padding:4px}
+.ph-t .im img{max-width:100%;max-height:102px;display:block}
+.ph-t .acts{display:flex;gap:4px;align-items:center}
 
 /* ---------- chart ---------- */
 .chart{position:relative}
@@ -290,7 +310,9 @@ table.lines .amt{text-align:right;font-variant-numeric:tabular-nums;padding-inli
   body{background:#fff}
   .app,.toast,.scrim{display:none!important}
   #printRoot{display:block}
-  #printRoot .paper{box-shadow:none;width:210mm;min-height:296mm}
+  #printRoot .paper{box-shadow:none;width:210mm;min-height:296mm;break-after:page;page-break-after:always}
+  #printRoot .paper:last-child{break-after:auto;page-break-after:auto}
+  #printRoot .paper.ph{height:296mm;min-height:0}
 }
 </style>
 </head>
@@ -543,7 +565,7 @@ VIEWS.home = () => {
     [noGstin === 0, `GSTIN for clients — ${noGstin} of ${S.clients.length} are blank on <a href="#" data-go="clients">Clients</a>. A tax invoice is incomplete without it.`],
   ];
   const recent = appDocs().sort((a, b) => (b.savedAt || "").localeCompare(a.savedAt || "")).slice(0, 6);
-  const ser = t => { const s = st.series[t] || {}; return esc((s.prefix || "") + String(s.next || 1).padStart(3, "0")); };
+  const ser = t => esc(autoNo(t));
   return `
   <div class="head"><div><div class="eyebrow">${esc(fmtDate(todayISO()))}</div><h1>Quotations, invoices, expenses &amp; profit</h1><p>Scan · Design · Media · Print — every document you make here is logged, numbered and remembered for the next customer call.</p></div></div>
   <div class="grid g4">
@@ -637,7 +659,7 @@ function blankLine() { return {desc: "", hsn: "", qty: "", unit: "", rate: "", g
 function blankDraft() {
   return {client: "", address: "", gstin: "", pos: "", contact: "", no: "", noAuto: true, date: todayISO(), supply: INTRA,
           vertical: (set().lists.verticals || ["Printing"])[0], ref: "", discount: 0,
-          lines: Array.from({length: LINES}, blankLine), editingId: null, fromId: null, tab: "edit"};
+          lines: Array.from({length: LINES}, blankLine), photos: [], editingId: null, fromId: null, tab: "edit"};
 }
 function draft(t = S.edType) {
   if (!S.drafts[t]) {
@@ -648,7 +670,22 @@ function draft(t = S.edType) {
   return S.drafts[t];
 }
 const persistDraft = debounce(() => { for (const t in S.drafts) ls.set("draft:" + t, S.drafts[t]); }, 400);
-function autoNo(t) { const s = set().series[t] || {}; return (s.prefix || "") + String(num(s.next) || 1).padStart(3, "0"); }
+/* Document numbers: the next number skips any number already used (e.g. one picked ahead of time). */
+function fmtNo(t, n) { const s = set().series[t] || {}; return (s.prefix || "") + String(n).padStart(3, "0"); }
+function noKey(no) {
+  no = String(no || "").trim();
+  for (const s of Object.values(set().series || {})) {
+    const p = s.prefix || "", rest = no.slice(p.length);
+    if (p && no.toLowerCase().startsWith(p.toLowerCase()) && /^\d+$/.test(rest)) return (p + Number(rest)).toLowerCase();
+  }
+  return no.toLowerCase();
+}
+function usedNo(no, exceptId) { const k = noKey(no); return k ? S.docs.find(x => x.id !== exceptId && noKey(x.no) === k) : null; }
+function autoNo(t) {
+  let n = num((set().series[t] || {}).next) || 1;
+  for (let i = 0; i < 100000 && usedNo(fmtNo(t, n)); i++) n++;
+  return fmtNo(t, n);
+}
 function docNo(t = S.edType) { const d = draft(t); return d.noAuto || !d.no ? autoNo(t) : d.no; }
 function lastDate(t, d) { return addDays(d.date, TYPES[t].kind === "quote" ? num(set().defaults.quoteValidity) : num(set().defaults.payTerms)); }
 
@@ -692,6 +729,7 @@ function docFromDraft(t = S.edType) {
     supply: T.gst ? d.supply : "", vertical: d.vertical, ref: T.refLabel ? d.ref : "", discount: c.discount,
     lines, subtotal: c.sub, cgst: c.cgst, sgst: c.sgst, igst: c.igst, roundOff: c.ro, total: c.total,
     taxable: c.taxable, gstAmt: c.gstAmt, cost: c.cost,
+    photos: (d.photos || []).map(p => ({id: p.id, cap: p.cap || "", f: p.f || photoFileOf(p.id)})),
     summary: items.slice(0, 3).join(", ") + (items.length > 3 ? ` +${items.length - 3} more` : "")};
 }
 
@@ -736,6 +774,8 @@ VIEWS.editor = () => {
           <label class="f" for="ed-vertical">Vertical<select class="inp fill" id="ed-vertical">${opt(L.verticals || [], d.vertical)}</select></label>
           ${T.refLabel ? `<label class="f" for="ed-ref">${esc(T.refLabel)}<input class="inp fill mono" id="ed-ref" value="${esc(d.ref)}" list="dl-refs"></label>` : ""}
         </div>
+        <p class="muted" style="margin:0;font-size:12.5px">Want a later number for this one? Type just the number (e.g. <b>10</b>) in ${esc(T.noLabel)}. The normal sequence carries on and skips it when it gets there.</p>
+        <p class="bad-t" id="ed-no-warn" style="margin:0;font-size:13px;font-weight:600" hidden></p>
       </div>
     </div>
     <div class="lines-wrap"><table class="lines" id="ed-lines">
@@ -760,6 +800,14 @@ VIEWS.editor = () => {
       </div>
       <div class="card"><div class="totals" id="ed-totals"></div></div>
     </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+        <div><h2 style="margin:0">Product photos</h2><p class="muted" style="margin:2px 0 0;font-size:13px">Printed on extra A4 pages after the ${esc(T.title.toLowerCase())}, up to 6 photos per page. Press Save after adding.</p></div>
+        <label class="btn" for="ed-photo-in" style="cursor:pointer">Add photos</label>
+        <input type="file" id="ed-photo-in" accept="image/*" multiple hidden>
+      </div>
+      <div class="ph-thumbs" id="ed-photos"></div>
+    </div>
   </div>
   <div id="ed-prev" ${d.tab === "preview" ? "" : "hidden"}><div class="preview-wrap"><div id="prev-box"><div class="preview-scale" id="prev-scale"></div></div></div></div>
   <datalist id="dl-refs">${(T.kind === "invoice" ? quotes().filter(q => q.type === (t === "INVOICE" ? "QUOTE" : "ESTIMATE")) : []).map(q => `<option value="${esc(q.no)}">${esc(q.client)}</option>`).join("")}</datalist>`;
@@ -775,6 +823,10 @@ AFTER.editor = () => {
   on("ed-contact", "input", e => { d.contact = e.target.value; touch(); });
   on("ed-pos", "input", e => { d.pos = e.target.value; touch(); });
   on("ed-no", "input", e => { d.no = e.target.value; d.noAuto = e.target.value.trim() === autoNo(t) || !e.target.value.trim(); touch(); });
+  on("ed-no", "change", e => {
+    const v = e.target.value.trim();
+    if (/^\d+$/.test(v) && Number(v) > 0 && (set().series[t] || {}).prefix) { d.no = fmtNo(t, Number(v)); e.target.value = d.no; d.noAuto = d.no === autoNo(t); touch(); }
+  });
   on("ed-date", "input", e => { d.date = e.target.value || todayISO(); touch(); });
   on("ed-supply", "change", e => { d.supply = e.target.value; touch(); });
   on("ed-vertical", "change", e => { d.vertical = e.target.value; touch(); });
@@ -799,6 +851,32 @@ AFTER.editor = () => {
   on("ed-print", "click", () => printDoc(docFromDraft()));
   on("ed-pdf", "click", () => pdfDoc(docFromDraft()));
   on("ed-save", "click", saveDoc);
+  on("ed-photo-in", "change", async e => {
+    const files = [...e.target.files]; e.target.value = "";
+    if (!files.length) return;
+    d.photos = d.photos || [];
+    toast(`Adding ${files.length} photo${files.length > 1 ? "s" : ""}…`);
+    let n = 0;
+    for (const f of files) {
+      try { const u = await shrinkImage(f); const id = "p" + newId(); await kv.set("img:" + id, u); S.img[id] = u; d.photos.push({id, cap: "", f: ""}); n++; }
+      catch { toast(`Couldn't read ${f.name} — is it a photo?`, true); }
+    }
+    persistDraft(); drawThumbs();
+    if (d.tab === "preview") renderPreview();
+    if (n) toast(`${n} photo${n > 1 ? "s" : ""} added. Press Save to keep ${n > 1 ? "them" : "it"} with the document.`);
+  });
+  const pb = $("#ed-photos");
+  if (pb) {
+    pb.addEventListener("input", e => { const i = e.target.dataset.cap; if (i == null) return; d.photos[+i].cap = e.target.value; persistDraft(); });
+    pb.addEventListener("click", e => {
+      const card = e.target.closest(".ph-t"); if (!card) return;
+      const i = +card.dataset.i;
+      if (e.target.closest("[data-rm]")) d.photos.splice(i, 1);
+      else { const mv = e.target.closest("[data-mv]"); if (!mv) return; const j = i + Number(mv.dataset.mv); if (j < 0 || j >= d.photos.length) return; [d.photos[i], d.photos[j]] = [d.photos[j], d.photos[i]]; }
+      persistDraft(); drawThumbs();
+    });
+  }
+  drawThumbs();
   syncEditorButtons();
   recalc();
 };
@@ -868,6 +946,8 @@ function recalc() {
     ${has ? "" : `<p style="margin:10px 0 0;font-size:12.5px">Add Cost on the Rate Card to see margin here.</p>`}`;
   const w = $("#ed-gstin-warn");
   if (w) { const bad = T.gst && d.client.trim() && !d.gstin.trim(); w.hidden = !bad; w.textContent = bad ? "No GSTIN for this client — a tax invoice needs it. Add it here or on Clients." : ""; }
+  const nw = $("#ed-no-warn");
+  if (nw) { const clash = usedNo(docNo(t), d.editingId); nw.hidden = !clash; nw.textContent = clash ? `${docNo(t)} is already used (${clash.client || "—"}, ${fmtDate(clash.date)}). Pick another number.` : ""; }
   const st = $("#ed-state");
   st.innerHTML = d.editingId ? `<b>Saved ✓</b> — Save again updates <span class="mono">${esc(docNo(t))}</span>` : `New · not saved yet`;
   if (d.tab === "preview") renderPreview();
@@ -880,7 +960,9 @@ function refreshEditorFromStore() {
 }
 function renderPreview() {
   const box = $("#prev-box"), sc = $("#prev-scale");
-  sc.innerHTML = `<div class="sheet-frame">${docHTML(docFromDraft())}</div>`;
+  const doc = docFromDraft();
+  if ((doc.photos || []).some(p => !S.img[p.id])) ensureImgs(doc).then(ch => { if (ch && S.view === "editor" && draft().tab === "preview") renderPreview(); });
+  sc.innerHTML = `<div class="sheet-frame">${docHTML(doc)}</div>`;
   const avail = $("#ed-prev .preview-wrap").clientWidth - 40;
   const w = 794 + 28, h = sc.firstElementChild.offsetHeight;
   const k = Math.min(1, avail / w);
@@ -903,7 +985,7 @@ async function copyAcross() {
   const src = docNo(from);
   S.drafts[to] = {...blankDraft(), client: d.client, address: d.address, gstin: d.gstin, pos: d.pos, contact: d.contact, vertical: d.vertical,
     supply: d.supply, ref: src, fromId: d.editingId || null,
-    lines: d.lines.map(l => ({...l, hsn: TYPES[to].gst ? l.hsn : ""}))};
+    lines: d.lines.map(l => ({...l, hsn: TYPES[to].gst ? l.hsn : ""})), photos: (d.photos || []).map(p => ({...p}))};
   persistDraft();
   go(to);
   toast(`${from === "QUOTE" ? "Quote" : "Estimate"} ${src} copied into the ${to.toLowerCase()}. Check it, then Save.`);
@@ -917,11 +999,12 @@ async function saveDoc() {
   if (!body.no.trim()) { toast("Give the document a number.", true); return; }
   const id = safeId(body.no);
   const log = T.kind === "quote" ? "Quotations" : "Invoices";
-  const existing = S.docs.find(x => x.id === id);
-  if (existing && d.editingId !== id) {
-    if (!(await confirmBox("Number already used", `<span class="mono">${esc(body.no)}</span> is already in the ${log} log (${esc(existing.client)}, ${money0(existing.total)}). Replace that record with this one?`, "Replace it", true))) { toast("Nothing saved."); return; }
+  const clash = usedNo(body.no, d.editingId) || (S.docs.find(x => x.id === id && x.id !== d.editingId));
+  if (clash) {
+    await modal({title: "Number already used", body: `<p style="margin:0"><span class="mono">${esc(body.no)}</span> is already used (${esc(clash.client || "—")}, ${esc(fmtDate(clash.date))}, ${money0(clash.total)}). A number can only be used once — type a different number.</p>`, actions: [{label: "OK", value: true, cls: "primary"}]});
+    $("#ed-no")?.focus(); return;
   }
-  const keep = existing || (d.editingId && S.docs.find(x => x.id === d.editingId)) || {};
+  const keep = (d.editingId && S.docs.find(x => x.id === d.editingId)) || {};
   body.savedAt = new Date().toISOString();
   body.notes = keep.notes || "";
   if (T.kind === "quote") { body.status = keep.status || "Sent"; body.converted = keep.converted || ""; body.followUp = keep.followUp || ""; }
@@ -932,7 +1015,10 @@ async function saveDoc() {
     if (d.editingId && d.editingId !== id) await db.doc("docs/" + d.editingId).delete();
     const s = set().series[t] || {};
     const tail = body.no.startsWith(s.prefix || "") ? body.no.slice((s.prefix || "").length) : "";
-    if (/^\d+$/.test(tail) && Number(tail) >= num(s.next)) await db.doc("config/settings").update({series: {[t]: {prefix: s.prefix || "", next: Number(tail) + 1}}});
+    if (/^\d+$/.test(tail) && Number(tail) === num(s.next)) {           // the regular next number was used → move on to the next free one
+      let n = Number(tail) + 1; while (usedNo(fmtNo(t, n))) n++;
+      await db.doc("config/settings").update({series: {[t]: {prefix: s.prefix || "", next: n}}});
+    }
     if (d.fromId) { const q = S.docs.find(x => x.id === d.fromId); if (q) await db.doc("docs/" + d.fromId).update({status: "Invoiced", converted: body.no}); }
     if (isNew && T.kind === "invoice") {
       for (const l of body.lines) {
@@ -961,8 +1047,77 @@ async function openDoc(doc) {
   while (lines.length < LINES) lines.push(blankLine());
   S.drafts[t] = {...blankDraft(), client: doc.client || "", address: doc.address || "", gstin: doc.gstin || "", pos: doc.pos || "", contact: doc.contact || "",
     no: doc.no, noAuto: false, date: doc.date || todayISO(), supply: doc.supply || INTRA, vertical: doc.vertical || "Printing", ref: doc.ref || "",
-    discount: doc.discount || 0, lines, editingId: doc.id};
+    discount: doc.discount || 0, lines, photos: (doc.photos || []).map(p => ({...p})), editingId: doc.id};
   persistDraft(); go(t);
+}
+
+/* =====================================================================
+   Product photos (kept on this device + in a Google Drive folder)
+   ===================================================================== */
+S.img = {};
+function photoFileOf(pid) {
+  for (const r of Object.values(L.coll.docs || {})) for (const p of (r && r.photos) || []) if (p.id === pid && p.f) return p.f;
+  return "";
+}
+async function imgGet(id, f) {
+  if (S.img[id]) return false;
+  let u = await kv.get("img:" + id);
+  if (!u && f && navigator.onLine && tokenOk()) { try { u = await driveDownload(f); if (u) await kv.set("img:" + id, u); } catch {} }
+  if (u) { S.img[id] = u; return true; }
+  return false;
+}
+async function ensureImgs(doc) {
+  const got = await Promise.all((doc.photos || []).map(p => imgGet(p.id, p.f || photoFileOf(p.id))));
+  return got.some(Boolean);
+}
+function shrinkImage(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), im = new Image();
+    im.onload = () => {
+      const max = 1600, k = Math.min(1, max / Math.max(im.naturalWidth, im.naturalHeight));
+      const cv = document.createElement("canvas");
+      cv.width = Math.max(1, Math.round(im.naturalWidth * k)); cv.height = Math.max(1, Math.round(im.naturalHeight * k));
+      const cx = cv.getContext("2d"); cx.fillStyle = "#fff"; cx.fillRect(0, 0, cv.width, cv.height); cx.drawImage(im, 0, 0, cv.width, cv.height);
+      URL.revokeObjectURL(url);
+      res(cv.toDataURL("image/jpeg", 0.82));
+    };
+    im.onerror = () => { URL.revokeObjectURL(url); rej(new Error("not an image")); };
+    im.src = url;
+  });
+}
+async function drawThumbs() {
+  const box = $("#ed-photos"); if (!box) return;
+  const ps = draft().photos || [];
+  box.innerHTML = ps.map((p, i) => `<div class="ph-t" data-i="${i}">
+    <div class="im">${S.img[p.id] ? `<img src="${S.img[p.id]}" alt="Photo ${i + 1}">` : "Loading…"}</div>
+    <input class="inp" data-cap="${i}" value="${esc(p.cap || "")}" placeholder="Caption (optional)" aria-label="Caption for photo ${i + 1}">
+    <div class="acts"><button class="btn sm ghost" data-mv="-1" ${i ? "" : "disabled"} title="Move earlier" aria-label="Move earlier">←</button><button class="btn sm ghost" data-mv="1" ${i < ps.length - 1 ? "" : "disabled"} title="Move later" aria-label="Move later">→</button><span style="flex:1"></span><button class="btn sm ghost" data-rm>Remove</button></div>
+  </div>`).join("");
+  if (!ps.some(p => !S.img[p.id])) return;
+  await Promise.all(ps.map(p => imgGet(p.id, p.f || photoFileOf(p.id))));
+  ps.forEach((p, i) => {
+    const im = box.querySelector(`[data-i="${i}"] .im`); if (!im || im.querySelector("img")) return;
+    if (S.img[p.id]) im.innerHTML = `<img src="${S.img[p.id]}" alt="Photo ${i + 1}">`;
+    else im.textContent = (p.f || photoFileOf(p.id)) ? "Saved in Google Drive — sign in to load it" : "This photo is only on the device that added it";
+  });
+}
+function photoPages(doc) {
+  const ps = doc.photos || []; if (!ps.length) return "";
+  const T = TYPES[doc.type], c = set().company, per = 6, pages = [];
+  for (let i = 0; i < ps.length; i += per) pages.push(ps.slice(i, i + per));
+  return pages.map((g, pi) => {
+    const n = g.length, cols = n <= 2 ? 1 : 2, rows = Math.ceil(n / cols), gap = 12;
+    const rowH = Math.floor((985 - gap * (rows - 1)) / rows);
+    const hasCap = g.some(p => String(p.cap || "").trim());
+    const imgH = rowH - 16 - (hasCap ? 24 : 0);
+    return `<div class="paper ph">
+      <div class="phhead"><div><b class="t">Product photographs</b>${esc(c.name || "")}</div>
+        <div class="r">${esc(T.noLabel)} <b>${esc(doc.no)}</b> &nbsp;·&nbsp; ${fmtDate(doc.date)}<br>${esc(doc.client)}${pages.length > 1 ? ` &nbsp;·&nbsp; Photo sheet ${pi + 1} of ${pages.length}` : ""}</div></div>
+      <div class="phgrid" style="grid-template-columns:repeat(${cols},minmax(0,1fr));grid-template-rows:repeat(${rows},${rowH}px)">${g.map(p => `<figure>
+        <div class="phbox" style="height:${imgH}px">${S.img[p.id] ? `<img src="${S.img[p.id]}" alt="" style="max-height:${imgH}px">` : `<span class="phmiss">Photo not available on this device</span>`}</div>
+        ${hasCap ? `<figcaption>${esc(p.cap || "")}</figcaption>` : ""}</figure>`).join("")}</div>
+    </div>`;
+  }).join("");
 }
 
 /* =====================================================================
@@ -996,7 +1151,7 @@ function docHTML(doc) {
         ${doc.ref && T.refLabel ? `<span>${esc(T.refLabel)}</span><b>${esc(doc.ref)}</b>` : ""}
       </div></div>
     </div>
-    <table class="items"><thead><tr><th class="c" style="width:30px">Sr</th><th>Description of Goods / Service</th>${T.gst ? `<th style="width:70px">HSN/SAC</th>` : ""}<th class="r" style="width:54px">Qty</th><th style="width:46px">Unit</th><th class="r" style="width:80px">Rate ₹</th><th class="r" style="width:96px">Amount ₹</th></tr></thead>
+    <table class="items"><thead><tr><th class="c" style="width:30px">Sr</th><th>Description of Goods / Service</th>${T.gst ? `<th style="width:70px">HSN/SAC</th>` : ""}<th class="r" style="width:54px">Qty</th><th style="width:46px">Unit</th><th class="r" style="width:86px">Rate ₹</th><th class="r" style="width:100px">Amount ₹</th></tr></thead>
     <tbody>${lines.map((l, i) => `<tr><td class="c">${i + 1}</td><td>${esc(l.desc)}</td>${T.gst ? `<td>${esc(l.hsn)}</td>` : ""}<td class="r">${esc(l.qty)}</td><td>${esc(l.unit)}</td><td class="r">${money(l.rate)}</td><td class="r">${money(l.amount)}</td></tr>`).join("")}
     ${Array.from({length: fillers}, () => `<tr class="fill">${"<td></td>".repeat(cols)}</tr>`).join("")}</tbody></table>
     <div class="foot">
@@ -1010,14 +1165,15 @@ function docHTML(doc) {
     </div>
     <div class="sign"><div><div class="for">For ${esc(c.name)}</div><div class="by">Authorised Signatory</div></div></div>
     ${T.gst ? "" : `<div class="fine">This is not a tax invoice.</div>`}
-  </div>`;
+  </div>` + photoPages(doc);
 }
-function printDoc(doc) {
+async function printDoc(doc) {
   if (!doc.lines || !doc.lines.length) return toast("Add at least one line item first.", true);
-  $("#printRoot").innerHTML = docHTML(doc);
-  const img = $("#printRoot img");
-  const go = () => { try { window.print(); } catch { toast("Printing isn't allowed in this view — use Download PDF instead.", true); } };
-  if (img && !img.complete) img.onload = go; else go();
+  await ensureImgs(doc);
+  const root = $("#printRoot");
+  root.innerHTML = docHTML(doc);
+  await Promise.all($$("img", root).map(i => i.complete ? 0 : new Promise(r => { i.onload = i.onerror = r; })));
+  try { window.print(); } catch { toast("Printing isn't allowed in this view — use Download PDF instead.", true); }
 }
 function loadScript(src) {
   return new Promise((res, rej) => { if (document.querySelector(`script[src="${src}"]`)) return res(); const s = document.createElement("script"); s.src = src; s.onload = res; s.onerror = () => rej(new Error("Couldn't load " + src)); document.head.appendChild(s); });
@@ -1028,18 +1184,22 @@ async function pdfDoc(doc) {
   const b = $("#ed-pdf"); if (b) b.disabled = true;
   toast("Making the PDF…");
   try {
+    await ensureImgs(doc);
     await loadScript("https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js");
     await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
     const stage = $("#pdfStage");
     stage.innerHTML = docHTML(doc);
-    const el = stage.firstElementChild;
+    const pages = Array.from(stage.children);
     await Promise.all([document.fonts ? document.fonts.ready : 0, ...$$("img", stage).map(i => i.complete ? 0 : new Promise(r => { i.onload = i.onerror = r; }))]);
-    const canvas = await window.html2canvas(el, {scale: 2, backgroundColor: "#ffffff", useCORS: true, logging: false});
     const {jsPDF} = window.jspdf;
     const pdf = new jsPDF({orientation: "p", unit: "mm", format: "a4"});
-    let w = 210, h = 210 * canvas.height / canvas.width;
-    if (h > 297) { w = w * 297 / h; h = 297; }
-    pdf.addImage(canvas.toDataURL("image/jpeg", 0.92), "JPEG", (210 - w) / 2, 0, w, h);
+    for (const [i, el] of pages.entries()) {
+      const canvas = await window.html2canvas(el, {scale: 2, backgroundColor: "#ffffff", useCORS: true, logging: false});
+      let w = 210, h = 210 * canvas.height / canvas.width;
+      if (h > 297) { w = w * 297 / h; h = 297; }
+      if (i) pdf.addPage();
+      pdf.addImage(canvas.toDataURL("image/jpeg", 0.9), "JPEG", (210 - w) / 2, 0, w, h);
+    }
     const blob = pdf.output("blob");
     stage.innerHTML = "";
     const name = `${doc.type} ${String(doc.no).replace(/[\/\\:]/g, "-")} - ${String(doc.client).replace(/[\/\\:*?"<>|]/g, "-")}.pdf`;
@@ -1663,7 +1823,7 @@ const kv = (() => {
   };
 })();
 
-const blankL = () => ({email: "", settings: null, settingsU: "", coll: {clients: {}, ratecard: {}, docs: {}, payments: {}, expenses: {}}, lastSync: "", sheetId: "", lastBackup: "", dirty: false});
+const blankL = () => ({email: "", settings: null, settingsU: "", coll: {clients: {}, ratecard: {}, docs: {}, payments: {}, expenses: {}}, lastSync: "", sheetId: "", photoFolder: "", lastBackup: "", dirty: false});
 const L = blankL();
 S.sync = {state: "idle", msg: "", at: 0};
 
@@ -1675,7 +1835,7 @@ function publish() {
   changed();
 }
 const persist = debounce(async () => { if (L.email) await kv.set("state:" + L.email, clone(L)); }, 150);
-const scheduleSync = debounce(() => sync(false), 4000);
+const scheduleSync = debounce(() => sync(false), 800);   // push to Google almost straight after every save
 function touchLocal() { L.dirty = true; persist(); publish(); renderRail(); scheduleSync(); }
 const strip = d => { const o = clone(d); delete o.id; delete o._u; delete o._del; return o; };
 
@@ -1724,7 +1884,7 @@ S.dl = {
 const AUTH = {token: "", exp: 0, email: "", name: ""};
 const clientId = () => (CONFIG.GOOGLE_CLIENT_ID || ls.get("clientId", "")).trim();
 const tokenOk = () => !!AUTH.token && Date.now() < AUTH.exp;
-try { const t = JSON.parse(sessionStorage.getItem("vd:tok") || "null"); if (t && t.e > Date.now()) { AUTH.token = t.t; AUTH.exp = t.e; AUTH.email = t.m || ""; } } catch {}
+try { const t = JSON.parse(localStorage.getItem("vd:tok") || sessionStorage.getItem("vd:tok") || "null"); if (t && t.e > Date.now()) { AUTH.token = t.t; AUTH.exp = t.e; AUTH.email = t.m || ""; } } catch {}
 
 async function getToken() {
   if (!clientId()) throw Object.assign(new Error("Add the Google Client ID first (Google & backup → Setup)."), {code: "setup"});
@@ -1744,7 +1904,7 @@ async function getToken() {
     google.accounts.oauth2.initTokenClient(cfg).requestAccessToken({prompt: ""});
   });
 }
-function rememberToken() { try { sessionStorage.setItem("vd:tok", JSON.stringify({t: AUTH.token, e: AUTH.exp, m: AUTH.email})); } catch {} }
+function rememberToken() { try { localStorage.setItem("vd:tok", JSON.stringify({t: AUTH.token, e: AUTH.exp, m: AUTH.email})); } catch {} ls.set("granted", true); }
 
 async function gfetch(url, opts = {}) {
   if (!tokenOk()) throw Object.assign(new Error("Google sign-in has expired."), {code: "auth"});
@@ -1788,7 +1948,7 @@ async function signOut() {
   if (!(await confirmBox("Sign out?", "Your records stay on this computer and in your Google Sheet. You'll need to sign in again to sync.", "Sign out"))) return;
   try { if (AUTH.token && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(AUTH.token, () => {}); } catch {}
   AUTH.token = ""; AUTH.exp = 0;
-  try { sessionStorage.removeItem("vd:tok"); } catch {}
+  try { sessionStorage.removeItem("vd:tok"); localStorage.removeItem("vd:tok"); } catch {}
   ls.set("signedOut", true);
   showGate(true);
 }
@@ -1937,7 +2097,10 @@ function sync(interactive) {
           else if (stable(l) !== stable(r)) { loc[id] = r; pulled++; }
         }
       }
+      try { if (await photoSync()) push = true; }
+      catch (e) { if (e.code === "auth" || e.code === "net") throw e; console.warn("Photo sync:", e); toast("Photos couldn't be copied to Google Drive this time: " + (e.message || "unknown error"), true); }
       if (push) await writeAll();
+      try { L.remoteMod = (await gfetch(`${DRIVE}/${L.sheetId}?fields=modifiedTime`)).modifiedTime || ""; } catch {}
       for (const c of COLLS) for (const [id, r] of Object.entries(L.coll[c])) if (r._del) delete L.coll[c][id];
       L.lastSync = started; L.dirty = false;
       persist();
@@ -1954,6 +2117,76 @@ function sync(interactive) {
     }
   })();
   return syncing;
+}
+
+/* Photos ⇄ Google Drive folder "VD Enterprise Desk Photos" */
+const DRIVE = "https://www.googleapis.com/drive/v3/files";
+const PHOTO_FOLDER = "VD Enterprise Desk Photos";
+async function photoFolder() {
+  if (L.photoFolder) return L.photoFolder;
+  const q = encodeURIComponent(`name='${PHOTO_FOLDER}' and mimeType='application/vnd.google-apps.folder' and trashed=false`);
+  const f = await gfetch(`${DRIVE}?q=${q}&fields=files(id)&spaces=drive`);
+  L.photoFolder = f.files && f.files.length ? f.files[0].id
+    : (await gfetch(`${DRIVE}?fields=id`, {method: "POST", body: JSON.stringify({name: PHOTO_FOLDER, mimeType: "application/vnd.google-apps.folder"})})).id;
+  persist();
+  return L.photoFolder;
+}
+async function driveUpload(name, dataURL, folder) {
+  const jpeg = await (await fetch(dataURL)).blob();
+  const bnd = "vdb" + newId();
+  const body = new Blob([`--${bnd}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({name, mimeType: "image/jpeg", parents: [folder]})}\r\n--${bnd}\r\nContent-Type: image/jpeg\r\n\r\n`, jpeg, `\r\n--${bnd}--`]);
+  let r;
+  try { r = await fetch("https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id", {method: "POST", headers: {Authorization: "Bearer " + AUTH.token, "Content-Type": `multipart/related; boundary=${bnd}`}, body}); }
+  catch { throw Object.assign(new Error("Couldn't reach Google — check the internet connection."), {code: "net"}); }
+  if (r.status === 401) { AUTH.token = ""; throw Object.assign(new Error("Google sign-in has expired."), {code: "auth"}); }
+  if (!r.ok) { let m = "upload failed (" + r.status + ")"; try { m = (await r.json()).error.message; } catch {} throw new Error(m); }
+  return (await r.json()).id;
+}
+async function driveDownload(fileId) {
+  const r = await fetch(`${DRIVE}/${encodeURIComponent(fileId)}?alt=media`, {headers: {Authorization: "Bearer " + AUTH.token}});
+  if (r.status === 401) { AUTH.token = ""; return ""; }
+  if (!r.ok) return "";
+  const blob = await r.blob();
+  return new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(blob); });
+}
+async function photoSync() {
+  let uploaded = 0, touched = 0;
+  const docs = Object.entries(L.coll.docs).filter(([, r]) => r && !r._del && Array.isArray(r.photos) && r.photos.length);
+  // 1. send photos that only exist on this device
+  for (const [id, r] of docs) {
+    let changed = false;
+    for (const p of r.photos) {
+      if (p.f) continue;
+      const known = photoFileOf(p.id);
+      if (known) { p.f = known; changed = true; continue; }
+      const u = S.img[p.id] || await kv.get("img:" + p.id);
+      if (!u) continue;
+      p.f = await driveUpload(`${r.no || id} - ${p.id}.jpg`, u, await photoFolder());
+      changed = true; uploaded++;
+    }
+    if (changed) { r._u = nowISO(); touched++; }
+  }
+  if (uploaded || docs.length) {
+    for (const t in S.drafts) for (const p of S.drafts[t].photos || []) if (!p.f) p.f = photoFileOf(p.id);
+    persistDraft();
+  }
+  // 2. fetch photos added on another device
+  for (const [, r] of docs) for (const p of r.photos) {
+    if (!p.f || S.img[p.id] || await kv.get("img:" + p.id)) continue;
+    const u = await driveDownload(p.f);
+    if (u) { await kv.set("img:" + p.id, u); S.img[p.id] = u; }
+  }
+  if (touched) persist();
+  return touched > 0;
+}
+
+/* Quick check every 20 s: has another device changed the Google Sheet? (one tiny request) */
+async function checkRemote() {
+  if (document.visibilityState !== "visible" || syncing || !L.email || !L.sheetId || !navigator.onLine || !tokenOk()) return;
+  try {
+    const m = await gfetch(`${DRIVE}/${L.sheetId}?fields=modifiedTime`);
+    if (m.modifiedTime && m.modifiedTime !== L.remoteMod) sync(false);
+  } catch {}
 }
 
 function ago(iso) {
@@ -1979,6 +2212,7 @@ function syncBadge() {
 function syncBanner() {
   const empty = !L.settings && !Object.keys(L.coll.clients).length && !Object.keys(L.coll.ratecard).length;
   if (empty && L.email && S.sync.state !== "syncing") return `<div class="banner row">No records on this computer yet. <button class="btn sm primary" data-import>Import starting data</button><span class="muted">Pick “VD starting data.json”. Used the app on another computer? Press <a href="#" data-syncnow>Sync now</a> instead.</span></div>`;
+  if (S.sync.state === "signin" && L.email) return `<div class="banner row">${L.dirty ? "Changes on this device aren't copied to Google yet." : "Not connected to Google — records added on your other devices won't show here until you sync."} <button class="btn sm primary" data-syncnow>Sign in &amp; sync</button></div>`;
   if (S.sync.state === "error") return `<div class="banner row">Couldn't sync with Google: ${esc(S.sync.msg)} — your work is safe on this computer. <button class="btn sm" data-syncnow>Try again</button></div>`;
   return "";
 }
@@ -2160,11 +2394,24 @@ async function showGate(on) {
     sync(false);
   } else showGate(true);
   setInterval(() => sync(false), 3 * 60 * 1000);
+  setInterval(checkRemote, 20 * 1000);
   setInterval(() => renderRail(), 60 * 1000);
   window.addEventListener("online", () => sync(false));
   window.addEventListener("offline", () => setSync("offline"));
   let lastFocus = 0;
   window.addEventListener("focus", () => { if (Date.now() - lastFocus > 60000) { lastFocus = Date.now(); sync(false); } });
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && Date.now() - lastFocus > 30000) { lastFocus = Date.now(); sync(false); } });
+  if (clientId() && navigator.onLine && /^https?:$/.test(location.protocol)) loadScript("https://accounts.google.com/gsi/client").catch(() => {});
+  // Google sign-in lasts ~1 hour. When it has run out, the next tap anywhere quietly renews it
+  // (Google needs a tap to open its sign-in window), then syncs.
+  let lastAuto = 0;
+  document.addEventListener("click", e => {
+    if (tokenOk() || !navigator.onLine || !clientId() || !L.email || !ls.get("granted", false) || ls.get("signedOut", false)) return;
+    if (e.target.closest("[data-signin],[data-syncnow],#gate,input,select,textarea,label")) return;
+    if (Date.now() - lastAuto < 60 * 1000) return;
+    lastAuto = Date.now();
+    getToken().then(() => { rememberToken(); return sync(false); }).catch(() => {});
+  }, true);
   if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register("sw.js").catch(() => {});
   window.VD = {importObject: async obj => { const f = new File([JSON.stringify(obj)], "data.json"); return importFile(f); }, L};
 })();
