@@ -1890,7 +1890,12 @@ async function getToken() {
   if (!clientId()) throw Object.assign(new Error("Add the Google Client ID first (Google & backup → Setup)."), {code: "setup"});
   if (!navigator.onLine) throw new Error("You're offline — connect to the internet to sign in.");
   await loadScript("https://accounts.google.com/gsi/client");
-  return new Promise((res, rej) => {
+  return new Promise((resolve, reject) => {
+    // Never wait for ever: phones sometimes lose the Google window without telling the page.
+    let done = false;
+    const tm = setTimeout(() => rej(new Error("Google sign-in didn't finish — tap Sync now to try again.")), 90 * 1000);
+    function res(v) { if (done) return; done = true; clearTimeout(tm); resolve(v); }
+    function rej(e) { if (done) return; done = true; clearTimeout(tm); reject(e); }
     const cfg = {
       client_id: clientId(), scope: SCOPES,
       callback: r => {
@@ -1901,7 +1906,8 @@ async function getToken() {
       error_callback: e => rej(new Error(e && e.type === "popup_closed" ? "Sign-in window was closed." : e && e.type === "popup_failed_to_open" ? "The browser blocked the Google sign-in window — allow pop-ups for this site." : "Google sign-in didn't finish."))
     };
     if (L.email || AUTH.email) cfg.login_hint = L.email || AUTH.email;
-    google.accounts.oauth2.initTokenClient(cfg).requestAccessToken({prompt: ""});
+    try { google.accounts.oauth2.initTokenClient(cfg).requestAccessToken({prompt: ""}); }
+    catch (e) { rej(new Error("Google sign-in couldn't start: " + (e && e.message || e))); }
   });
 }
 function rememberToken() { try { localStorage.setItem("vd:tok", JSON.stringify({t: AUTH.token, e: AUTH.exp, m: AUTH.email})); } catch {} ls.set("granted", true); }
@@ -1910,7 +1916,9 @@ async function gfetch(url, opts = {}) {
   if (!tokenOk()) throw Object.assign(new Error("Google sign-in has expired."), {code: "auth"});
   let r;
   try {
-    r = await fetch(url, {...opts, headers: {Authorization: "Bearer " + AUTH.token, ...(opts.body ? {"Content-Type": "application/json"} : {})}});
+    const ac = new AbortController(), tm = setTimeout(() => ac.abort(), 45 * 1000);
+    try { r = await fetch(url, {...opts, signal: ac.signal, headers: {Authorization: "Bearer " + AUTH.token, ...(opts.body ? {"Content-Type": "application/json"} : {})}}); }
+    finally { clearTimeout(tm); }
   } catch { throw Object.assign(new Error("Couldn't reach Google — check the internet connection."), {code: "net"}); }
   if (r.status === 401) { AUTH.token = ""; throw Object.assign(new Error("Google sign-in has expired."), {code: "auth"}); }
   if (!r.ok) {
@@ -2057,14 +2065,22 @@ function setSync(state, msg = "") {
   if (S.view === "sync") render();
   else if ((state === "error") !== (was === "error") && S.view !== "editor") render();
 }
-function sync(interactive) {
+async function sync(interactive) {
+  if (interactive && L.email && clientId() && navigator.onLine && !tokenOk()) {
+    setSync("connecting");
+    try { await getToken(); rememberToken(); }
+    catch (e) { setSync(e.code === "setup" ? "setup" : "signin"); toast(e.message || "Google sign-in didn't finish.", true); return; }
+  }
+  return syncLocked(interactive);
+}
+function syncLocked(interactive) {
   if (syncing) { syncAgain = true; return syncing; }
   syncing = (async () => {
     try {
       if (!L.email) return;
       if (!clientId()) return setSync("setup");
       if (!navigator.onLine) return setSync("offline");
-      if (!tokenOk()) { if (!interactive) return setSync("signin"); await getToken(); rememberToken(); }
+      if (!tokenOk()) return setSync("signin");
       setSync("syncing");
       const started = nowISO();
       await ensureSheet();
@@ -2113,7 +2129,7 @@ function sync(interactive) {
       if (interactive || (e.code !== "auth" && e.code !== "net")) toast("Google sync: " + (e.message || "failed"), true);
     } finally {
       syncing = null;
-      if (syncAgain) { syncAgain = false; setTimeout(() => sync(false), 600); }
+      if (syncAgain) { syncAgain = false; setTimeout(() => syncLocked(false), 600); }
     }
   })();
   return syncing;
@@ -2200,6 +2216,7 @@ function syncBadge() {
   const s = S.sync.state, pend = L.dirty;
   const map = {
     syncing: ["spin", "Syncing with Google…"],
+    connecting: ["spin", "Signing in to Google…"],
     ok: ["on", pend ? "Saved · syncing soon" : "Synced " + ago(L.lastSync)],
     signin: ["warn", pend ? "Saved on this PC · sign in to sync" : "Sign in to sync"],
     offline: ["warn", "Offline · saved on this PC"],
@@ -2213,7 +2230,7 @@ function syncBanner() {
   const empty = !L.settings && !Object.keys(L.coll.clients).length && !Object.keys(L.coll.ratecard).length;
   if (S.sync.state === "signin" && L.email) return `<div class="banner row">${L.dirty ? "Changes on this device aren't copied to Google yet." : "Not connected to Google — records added on your other devices won't show here until you sync."} <button class="btn sm primary" data-syncnow>Sign in &amp; sync</button></div>`;
   if (S.sync.state === "error") return `<div class="banner row">Couldn't sync with Google: ${esc(S.sync.msg)} — your work is safe on this computer. <button class="btn sm" data-syncnow>Try again</button></div>`;
-  if (empty && L.email && S.sync.state !== "syncing" && S.sync.state !== "signin") return `<div class="banner row">No records on this computer yet. <button class="btn sm primary" data-import>Import starting data</button><span class="muted">Pick “VD starting data.json”. Used the app on another computer? Press <a href="#" data-syncnow>Sync now</a> instead.</span></div>`;
+  if (empty && L.email && S.sync.state !== "syncing" && S.sync.state !== "signin" && S.sync.state !== "connecting") return `<div class="banner row">No records on this computer yet. <button class="btn sm primary" data-import>Import starting data</button><span class="muted">Pick “VD starting data.json”. Used the app on another computer? Press <a href="#" data-syncnow>Sync now</a> instead.</span></div>`;
   return "";
 }
 
@@ -2283,7 +2300,7 @@ VIEWS.sync = () => {
       <h2 style="margin:0">Google account</h2>
       ${L.email ? (AUTH.name ? `<div><b>${esc(AUTH.name)}</b><div class="muted">${esc(L.email)}</div></div>` : `<div><b>${esc(L.email)}</b></div>`) : `<p class="muted" style="margin:0">Not signed in.</p>`}
       <div class="kvlist" style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:14px">
-        <span class="muted">Status</span><span>${esc({ok: "Up to date", syncing: "Syncing…", signin: "Sign in to sync", offline: "Offline — will sync when back online", error: "Problem: " + S.sync.msg, setup: "Add the Google Client ID below", idle: "Waiting"}[S.sync.state] || "")}</span>
+        <span class="muted">Status</span><span>${esc({ok: "Up to date", syncing: "Syncing…", connecting: "Waiting for the Google sign-in window…", signin: "Sign in to sync", offline: "Offline — will sync when back online", error: "Problem: " + S.sync.msg, setup: "Add the Google Client ID below", idle: "Waiting"}[S.sync.state] || "")}</span>
         <span class="muted">Last synced</span><span>${esc(ago(L.lastSync))}</span>
         <span class="muted">Google Sheet</span><span>${L.sheetId ? `<a href="https://docs.google.com/spreadsheets/d/${esc(L.sheetId)}/edit" target="_blank" rel="noopener">Open “${esc(CONFIG.SHEET_NAME)}” ↗</a>` : "Created on first sync"}</span>
       </div>
