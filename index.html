@@ -1790,7 +1790,7 @@ const CONFIG = {
   GOOGLE_CLIENT_ID: "906950619673-treueirc5fommes2r2disej8vpdoo42j.apps.googleusercontent.com",                 // e.g. "1234567890-abc123.apps.googleusercontent.com"
   SHEET_NAME: "VD Enterprise Desk Data" // the Google Sheet created in the user's Drive
 };
-const APP_VERSION = "7 (5 Nov 2026)";
+const APP_VERSION = "8 (5 Nov 2026)";
 const SCOPES = "openid email profile https://www.googleapis.com/auth/drive.file";
 /* Small on-screen sync log (Google & backup screen) — helps find problems on phones */
 const SYNCLOG = [];
@@ -2086,6 +2086,7 @@ async function sync(interactive) {
 function syncLocked(interactive) {
   if (syncing) { syncAgain = true; if (interactive) slog("A sync is already running — it will repeat when done"); return syncing; }
   syncing = (async () => {
+    await null;   // let "syncing" be set before this can finish — otherwise a sync with nothing to do left the lock on for ever
     try {
       if (!L.email) return;
       if (!clientId()) return setSync("setup");
