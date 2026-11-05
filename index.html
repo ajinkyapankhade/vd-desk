@@ -530,7 +530,7 @@ document.addEventListener("click", e => {
   go(g.dataset.go);
 });
 function go(id, opts = {}) {
-  if (TYPES[id]) { S.view = "editor"; S.edType = id; } else { S.view = id; }
+  if (TYPES[id]) { if (!opts.keep) freshIfSaved(id); S.view = "editor"; S.edType = id; } else { S.view = id; }
   ls.set("view", id);
   renderRail(); render(opts);
   window.scrollTo(0, 0);
@@ -668,6 +668,17 @@ function draft(t = S.edType) {
     while (S.drafts[t].lines.length < LINES) S.drafts[t].lines.push(blankLine());
   }
   return S.drafts[t];
+}
+/* After a document is saved, coming back to its screen starts a blank one with the next number.
+   Unsaved work (or a saved one changed since) is kept. */
+function draftSig(d) {
+  return JSON.stringify([d.client, d.address, d.gstin, d.pos, d.contact, d.no, d.date, d.supply, d.vertical, d.ref, String(d.discount || ""),
+    (d.lines || []).filter(l => String(l.desc).trim()).map(l => [l.desc, l.hsn, String(l.qty), l.unit, String(l.rate), String(l.gst)]),
+    (d.photos || []).map(p => [p.id, p.cap || ""])]);
+}
+function freshIfSaved(t) {
+  const d = draft(t);
+  if (d.editingId && d.savedSig && d.savedSig === draftSig(d)) { S.drafts[t] = {...blankDraft(), tab: "edit"}; ls.set("draft:" + t, S.drafts[t]); }
 }
 const persistDraft = debounce(() => { for (const t in S.drafts) ls.set("draft:" + t, S.drafts[t]); }, 400);
 /* Document numbers: the next number skips any number already used (e.g. one picked ahead of time). */
@@ -987,7 +998,7 @@ async function copyAcross() {
     supply: d.supply, ref: src, fromId: d.editingId || null,
     lines: d.lines.map(l => ({...l, hsn: TYPES[to].gst ? l.hsn : ""})), photos: (d.photos || []).map(p => ({...p}))};
   persistDraft();
-  go(to);
+  go(to, {keep: true});
   toast(`${from === "QUOTE" ? "Quote" : "Estimate"} ${src} copied into the ${to.toLowerCase()}. Check it, then Save.`);
 }
 
@@ -1030,7 +1041,7 @@ async function saveDoc() {
   });
   if (btn) btn.disabled = false;
   if (!ok) return;
-  d.editingId = id; d.no = body.no; d.noAuto = false; d.fromId = null;
+  d.editingId = id; d.no = body.no; d.noAuto = false; d.fromId = null; d.savedSig = draftSig(d);
   persistDraft(); recalc();
   toast(`Saved ${body.no} to ${log}.${isNew ? " Next number is ready — press New for the next one." : ""}`);
 }
@@ -1048,7 +1059,8 @@ async function openDoc(doc) {
   S.drafts[t] = {...blankDraft(), client: doc.client || "", address: doc.address || "", gstin: doc.gstin || "", pos: doc.pos || "", contact: doc.contact || "",
     no: doc.no, noAuto: false, date: doc.date || todayISO(), supply: doc.supply || INTRA, vertical: doc.vertical || "Printing", ref: doc.ref || "",
     discount: doc.discount || 0, lines, photos: (doc.photos || []).map(p => ({...p})), editingId: doc.id};
-  persistDraft(); go(t);
+  S.drafts[t].savedSig = draftSig(S.drafts[t]);
+  persistDraft(); go(t, {keep: true});
 }
 
 /* =====================================================================
@@ -1790,7 +1802,7 @@ const CONFIG = {
   GOOGLE_CLIENT_ID: "906950619673-treueirc5fommes2r2disej8vpdoo42j.apps.googleusercontent.com",                 // e.g. "1234567890-abc123.apps.googleusercontent.com"
   SHEET_NAME: "VD Enterprise Desk Data" // the Google Sheet created in the user's Drive
 };
-const APP_VERSION = "8 (5 Nov 2026)";
+const APP_VERSION = "9 (5 Nov 2026)";
 const SCOPES = "openid email profile https://www.googleapis.com/auth/drive.file";
 /* Small on-screen sync log (Google & backup screen) — helps find problems on phones */
 const SYNCLOG = [];
@@ -2415,7 +2427,7 @@ async function showGate(on) {
    ===================================================================== */
 (async function boot() {
   const v = ls.get("view", "home");
-  if (TYPES[v]) { S.view = "editor"; S.edType = v; } else S.view = VIEWS[v] ? v : "home";
+  if (TYPES[v]) { S.view = "editor"; S.edType = v; try { freshIfSaved(v); } catch {} } else S.view = VIEWS[v] ? v : "home";
   renderRail(); render();
   const last = ls.get("lastEmail", "");
   const st = last ? await kv.get("state:" + last) : null;
