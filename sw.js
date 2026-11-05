@@ -1,6 +1,6 @@
 /* VD Enterprise Desk — keeps the app openable without internet.
    Change VERSION whenever you upload a new index.html. */
-const VERSION = "vd-desk-v6";
+const VERSION = "vd-desk-v7";
 const SHELL = ["./", "./index.html", "./manifest.webmanifest", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", e => {
@@ -17,7 +17,8 @@ self.addEventListener("fetch", e => {
   if (/(^|\.)googleapis\.com$/.test(url.hostname) && !url.hostname.startsWith("fonts.") || url.hostname === "accounts.google.com") return;
   // The app page: network first so updates arrive, cached copy when offline.
   if (req.mode === "navigate") {
-    e.respondWith(fetch(req).then(r => { const copy = r.clone(); caches.open(VERSION).then(c => c.put("./index.html", copy)); return r; })
+    // always ask GitHub for the newest page (ignore the browser's 10-minute copy)
+    e.respondWith(fetch(req.url, {cache: "no-cache", credentials: "same-origin"}).then(r => { const copy = r.clone(); caches.open(VERSION).then(c => c.put("./index.html", copy)); return r; })
       .catch(() => caches.match("./index.html")));
     return;
   }

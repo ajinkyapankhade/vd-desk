@@ -1790,7 +1790,16 @@ const CONFIG = {
   GOOGLE_CLIENT_ID: "906950619673-treueirc5fommes2r2disej8vpdoo42j.apps.googleusercontent.com",                 // e.g. "1234567890-abc123.apps.googleusercontent.com"
   SHEET_NAME: "VD Enterprise Desk Data" // the Google Sheet created in the user's Drive
 };
+const APP_VERSION = "7 (5 Nov 2026)";
 const SCOPES = "openid email profile https://www.googleapis.com/auth/drive.file";
+/* Small on-screen sync log (Google & backup screen) — helps find problems on phones */
+const SYNCLOG = [];
+function slog(msg, bad) {
+  const d = new Date(), t = [d.getHours(), d.getMinutes(), d.getSeconds()].map(x => String(x).padStart(2, "0")).join(":");
+  SYNCLOG.unshift({t, msg: String(msg), bad: !!bad}); SYNCLOG.length = Math.min(SYNCLOG.length, 12);
+  if (typeof S !== "undefined" && S.view === "sync") { const el = document.getElementById("synclog"); if (el) el.innerHTML = synclogHTML(); }
+}
+const synclogHTML = () => SYNCLOG.length ? SYNCLOG.map(x => `<div${x.bad ? ' class="bad-t"' : ""}><span class="mono">${x.t}</span> ${esc(x.msg)}</div>`).join("") : `<div class="muted">Nothing yet.</div>`;
 const SHEETS = "https://sheets.googleapis.com/v4/spreadsheets";
 const COLLS = ["clients", "ratecard", "docs", "payments", "expenses"];
 const nowISO = () => new Date().toISOString();
@@ -1946,6 +1955,7 @@ async function signIn() {
     ls.set("lastEmail", email); ls.set("signedOut", false);
     showGate(false); renderRail(); render();
     await sync(false);
+    slog("Signed in as " + email);
     toast(`Signed in as ${email}.`);
   } catch (e) {
     toast(e.message || "Sign-in failed.", true);
@@ -2067,24 +2077,25 @@ function setSync(state, msg = "") {
 }
 async function sync(interactive) {
   if (interactive && L.email && clientId() && navigator.onLine && !tokenOk()) {
-    setSync("connecting");
-    try { await getToken(); rememberToken(); }
-    catch (e) { setSync(e.code === "setup" ? "setup" : "signin"); toast(e.message || "Google sign-in didn't finish.", true); return; }
+    setSync("connecting"); slog("Opening Google sign-in…");
+    try { await getToken(); rememberToken(); slog("Google sign-in OK"); }
+    catch (e) { setSync(e.code === "setup" ? "setup" : "signin"); slog("Sign-in: " + (e.message || "didn't finish"), true); toast(e.message || "Google sign-in didn't finish.", true); return; }
   }
   return syncLocked(interactive);
 }
 function syncLocked(interactive) {
-  if (syncing) { syncAgain = true; return syncing; }
+  if (syncing) { syncAgain = true; if (interactive) slog("A sync is already running — it will repeat when done"); return syncing; }
   syncing = (async () => {
     try {
       if (!L.email) return;
       if (!clientId()) return setSync("setup");
-      if (!navigator.onLine) return setSync("offline");
-      if (!tokenOk()) return setSync("signin");
-      setSync("syncing");
+      if (!navigator.onLine) { slog("Offline", true); return setSync("offline"); }
+      if (!tokenOk()) { if (interactive) slog("Not signed in to Google", true); return setSync("signin"); }
+      setSync("syncing"); slog("Sync started");
       const started = nowISO();
       await ensureSheet();
       const R = await readAll();
+      slog("Read Google Sheet: " + COLLS.map(c => Object.keys(R.coll[c]).length).reduce((a, b) => a + b, 0) + " records");
       let push = R.needIds, pulled = 0;
       if (R.settings && (!L.settings || R.settingsU >= (L.settingsU || ""))) {
         const localSeries = clone(L.settings?.series || {});
@@ -2121,8 +2132,10 @@ function syncLocked(interactive) {
       L.lastSync = started; L.dirty = false;
       persist();
       if (pulled) publish();
+      slog(`Sync done — ${pulled} change${pulled === 1 ? "" : "s"} received${push ? ", this device's changes sent" : ""}`);
       setSync("ok");
     } catch (e) {
+      slog("Sync problem: " + (e.message || e), true);
       if (e.code === "auth") { AUTH.token = ""; setSync("signin"); }
       else if (e.code === "net") setSync("offline");
       else setSync("error", e.message || "Sync failed.");
@@ -2308,6 +2321,8 @@ VIEWS.sync = () => {
         ${signed ? `<button class="btn primary" data-syncnow>Sync now</button><button class="btn ghost" id="sg-out">Sign out</button>`
                  : `<button class="gbtn" data-signin>${G}Sign in with Google</button>`}
       </div>
+      <details ${SYNCLOG.some(x => x.bad) ? "open" : ""}><summary class="muted" style="cursor:pointer;font-size:13px">Sync details · app version ${esc(APP_VERSION)}</summary>
+        <div id="synclog" style="font-size:12.5px;display:grid;gap:2px;margin-top:6px">${synclogHTML()}</div></details>
       <p class="muted" style="margin:0;font-size:13px">You can read the Sheet or give it to your CA. Change records in the app — edits typed straight into the Sheet are picked up on the next sync, but leave the ID, Last Changed and App Details columns alone.</p>
     </div>
     <div class="card" style="display:flex;flex-direction:column;gap:12px">
