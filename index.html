@@ -100,6 +100,7 @@ main{min-width:0;padding-inline:clamp(16px,3vw,40px);padding-block:26px 64px}
 .btn.ghost:hover{background:var(--surface-2)}
 .btn.sm{padding:4px 9px;font-size:13px;border-radius:6px}
 .btn.danger{color:var(--bad)}
+.btn.primary.danger{background:var(--bad);border-color:var(--bad);color:#fff}
 .btn[disabled]{opacity:.45;cursor:not-allowed}
 .seg{display:inline-flex;border:1px solid var(--line-2);border-radius:8px;padding:2px;background:var(--surface)}
 .seg button{border:0;background:none;padding:5px 12px;border-radius:6px;cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted)}
@@ -266,6 +267,10 @@ table.lines .amt{text-align:right;font-variant-numeric:tabular-nums;padding-inli
 .paper.ph .phbox img{max-width:100%;width:auto;height:auto;display:block}
 .paper.ph .phmiss{color:#888;font-size:12px}
 .paper.ph figcaption{font-size:12px;text-align:center;min-height:18px;overflow-wrap:anywhere}
+.cam-ov{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:80;display:flex;align-items:center;justify-content:center;padding:16px}
+.cam-box{background:var(--surface);border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px;width:min(900px,100%)}
+.cam-box video{width:100%;max-height:70vh;background:#000;border-radius:10px;object-fit:contain;transition:opacity .15s}
+.cam-acts{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .ph-thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;margin-top:12px}
 .ph-thumbs:empty{display:none}
 .ph-t{border:1px solid var(--line);border-radius:10px;padding:6px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
@@ -390,7 +395,10 @@ const TYPES = {
              terms: ["This is an estimate only. GST not charged.","Payment: 75% advance, balance on delivery.","Rates valid till the date shown above.","Delivery: 4–5 working days after approval.","Transportation charges extra."]},
   BILL:     {gst: false, kind: "invoice", title: "BILL",        noLabel: "Bill No.",     dateLabel: "Due Date",    pair: null, refLabel: "Ref. Estimate No.",
              terms: ["Goods once sold will not be taken back.","Payment due within the terms stated above.","This is not a tax invoice. GST not charged.","Subject to Chh. Sambhajinagar jurisdiction.","E. & O.E."]},
+  PO:       {gst: true,  kind: "po",      title: "PURCHASE ORDER", noLabel: "PO No.",   dateLabel: "Deliver By",  pair: null, refLabel: "Supplier Quote Ref.", party: "Supplier",
+             terms: ["Please mention our PO number on your invoice and delivery challan.","Goods must match the description, quantity and rate above.","Deliver by the date shown above to the delivery address.","Payment as agreed, after goods are received in good condition.","Subject to Chh. Sambhajinagar jurisdiction."]},
 };
+const PO_STATUS = ["Draft", "Sent", "Confirmed", "Received", "Cancelled"];
 const LINES = 15;
 const INTRA = "Intra-State (CGST+SGST)", INTER = "Inter-State (IGST)";
 
@@ -400,7 +408,7 @@ const INTRA = "Intra-State (CGST+SGST)", INTER = "Inter-State (IGST)";
 const FALLBACK_SETTINGS = {
   company: {name: "", proprietor: "", addr1: "", addr2: "", phone: "", email: "", gstin: "", state: "Maharashtra", stateCode: "27", bank: "", acNo: "", branch: "", ifsc: "", upi: "", tagline: ""},
   defaults: {gst: 0.18, quoteValidity: 7, payTerms: 30, targetSolar: 0.3, targetPrinting: 0.4, fyStart: "2026-04-01"},
-  series: {QUOTE: {prefix: "Q/", next: 1}, INVOICE: {prefix: "INV/", next: 1}, ESTIMATE: {prefix: "EST/", next: 1}, BILL: {prefix: "B/", next: 1}},
+  series: {QUOTE: {prefix: "Q/", next: 1}, INVOICE: {prefix: "INV/", next: 1}, ESTIMATE: {prefix: "EST/", next: 1}, BILL: {prefix: "B/", next: 1}, PO: {prefix: "PO/", next: 1}},
   lists: {accounts: ["Cash","UPI"], categories: ["Misc"], verticals: ["Printing","Design","Media","Other"], units: ["PCS","NOS","SET","SQFT","SQIN","FT","MTR","KG","JOB","HR"], gstRates: [0,0.05,0.12,0.18,0.28], docStatus: ["Draft","Sent","Approved","Invoiced","Rejected","Expired"], payModes: ["Bank Transfer","UPI","Cash","Cheque"]}
 };
 const S = {
@@ -416,6 +424,7 @@ function rebuildIndex() {
   I.client = new Map(S.clients.map(c => [key(c.name), c]));
   const lines = [];
   for (const d of S.docs) for (const l of (d.lines || [])) {
+    if (d.kind === "po") continue;   // purchase orders are buying prices, not sales
     if (!l.desc) continue;
     lines.push({date: d.date || "", client: d.client || "", no: d.no || "", type: d.kind === "quote" ? "QUOTE" : "INVOICE", docType: d.type, desc: l.desc, hsn: l.hsn || "", qty: num(l.qty), unit: l.unit || "", rate: num(l.rate), amount: num(l.amount), legacy: d.source === "legacy"});
   }
@@ -441,6 +450,9 @@ function fillDatalists() {
 const appDocs = () => S.docs.filter(d => d.source === "app");
 function quotes() {
   return appDocs().filter(d => d.kind === "quote").sort((a, b) => (b.date + b.no).localeCompare(a.date + a.no));
+}
+function pos() {
+  return appDocs().filter(d => d.kind === "po").sort((a, b) => (b.date + b.no).localeCompare(a.date + a.no));
 }
 function invoices() {
   const today = todayISO(), terms = num(set().defaults.payTerms);
@@ -511,8 +523,8 @@ const confirmBox = async (title, body, yes = "Yes", danger) => (await modal({tit
    Navigation
    ===================================================================== */
 const NAV = [
-  {h: "Make a document", items: [["lookup", "Lookup"], ["QUOTE", "Quote", "GST"], ["INVOICE", "Invoice", "GST"], ["ESTIMATE", "Estimate", "NO GST"], ["BILL", "Bill", "NO GST"]]},
-  {h: "Keep the records", items: [["quotations", "Quotations"], ["invoices", "Invoices"], ["payments", "Payments"], ["expenses", "Expenses"]]},
+  {h: "Make a document", items: [["lookup", "Lookup"], ["QUOTE", "Quote", "GST"], ["INVOICE", "Invoice", "GST"], ["ESTIMATE", "Estimate", "NO GST"], ["BILL", "Bill", "NO GST"], ["PO", "Purchase Order", "BUY"]]},
+  {h: "Keep the records", items: [["quotations", "Quotations"], ["invoices", "Invoices"], ["pos", "Purchase Orders"], ["payments", "Payments"], ["expenses", "Expenses"]]},
   {h: "See how you're doing", items: [["dashboard", "Dashboard"]]},
   {h: "Reference", items: [["clients", "Clients"], ["ratecard", "Rate Card"], ["history", "Rate History"], ["settings", "Settings"], ["sync", "Google & backup"]]},
 ];
@@ -582,6 +594,7 @@ VIEWS.home = () => {
         <button class="tile" data-go="INVOICE"><b>INVOICE</b><span>With GST. The tax invoice.</span><span class="ser">next ${ser("INVOICE")}</span></button>
         <button class="tile" data-go="ESTIMATE"><b>ESTIMATE</b><span>No GST. For customers who don't want a GST document.</span><span class="ser">next ${ser("ESTIMATE")}</span></button>
         <button class="tile" data-go="BILL"><b>BILL</b><span>No GST. The non-GST version of an invoice.</span><span class="ser">next ${ser("BILL")}</span></button>
+        <button class="tile" data-go="PO"><b>PURCHASE ORDER</b><span>To a supplier — what you're buying.</span><span class="ser">next ${ser("PO")}</span></button>
       </div>
       <button class="btn" data-go="lookup" style="align-self:flex-start">Client on the phone? Look up the last rate →</button>
     </div>
@@ -698,7 +711,7 @@ function autoNo(t) {
   return fmtNo(t, n);
 }
 function docNo(t = S.edType) { const d = draft(t); return d.noAuto || !d.no ? autoNo(t) : d.no; }
-function lastDate(t, d) { return addDays(d.date, TYPES[t].kind === "quote" ? num(set().defaults.quoteValidity) : num(set().defaults.payTerms)); }
+function lastDate(t, d) { const k = TYPES[t].kind; return addDays(d.date, k === "po" ? 7 : k === "quote" ? num(set().defaults.quoteValidity) : num(set().defaults.payTerms)); }
 
 function compute(t, d) {
   const T = TYPES[t], I = S.idx;
@@ -750,7 +763,7 @@ VIEWS.editor = () => {
   const gstOpts = (v) => (L.gstRates || []).map(x => `<option value="${x}" ${num(x) === num(v) ? "selected" : ""}>${Math.round(num(x) * 100)}%</option>`).join("");
   return `
   <div class="head"><div><div class="eyebrow">${T.gst ? "With GST" : "No GST · not a tax invoice"}</div><h1>${esc(T.title === "TAX INVOICE" ? "Tax Invoice" : T.title[0] + T.title.slice(1).toLowerCase())}</h1>
-    <p>${T.kind === "quote" ? "Saves into the Quotations log." : "Saves into the Invoices log — payments clear the balance."} <span class="legend-fill"><i></i>you type</span> &nbsp; <span class="legend-fill"><i class="h"></i>helpers, never printed</span></p></div></div>
+    <p>${T.kind === "quote" ? "Saves into the Quotations log." : T.kind === "po" ? "Saves into the Purchase Orders log. Not counted as a sale." : "Saves into the Invoices log — payments clear the balance."} <span class="legend-fill"><i></i>you type</span> &nbsp; <span class="legend-fill"><i class="h"></i>helpers, never printed</span></p></div></div>
   <div class="ed-bar">
     <div class="seg" role="group" aria-label="View"><button id="tab-edit" aria-pressed="${d.tab !== "preview"}">Edit</button><button id="tab-prev" aria-pressed="${d.tab === "preview"}">Paper preview</button></div>
     <span class="state" id="ed-state"></span>
@@ -760,13 +773,14 @@ VIEWS.editor = () => {
     ${T.pair ? `<button class="btn" id="ed-copy">Copy → ${T.pair === "INVOICE" ? "Invoice" : "Bill"}</button>` : ""}
     <button class="btn" id="ed-print">Print</button>
     <button class="btn" id="ed-pdf" hidden>Download PDF</button>
+    ${d.editingId ? `<button class="btn ghost danger" data-deldoc="${esc(d.editingId)}">Delete</button>` : ""}
     <button class="btn primary" id="ed-save">Save</button>
   </div>
   <div id="ed-edit" ${d.tab === "preview" ? "hidden" : ""} style="display:flex;flex-direction:column;gap:16px">
     <div class="fieldset">
       <div class="card grid" style="gap:10px">
-        <h2 style="margin:0">Bill to</h2>
-        <label class="f" for="ed-client">Client<input class="inp fill" id="ed-client" list="dl-clients" value="${esc(d.client)}" placeholder="Pick a client, or just type the name" autocomplete="off"></label>
+        <h2 style="margin:0">${T.party ? esc(T.party) : "Bill to"}</h2>
+        <label class="f" for="ed-client">${T.party ? esc(T.party) + " name" : "Client"}<input class="inp fill" id="ed-client" list="dl-clients" value="${esc(d.client)}" placeholder="${T.party ? "Type the supplier's name" : "Pick a client, or just type the name"}" autocomplete="off"></label>
         <label class="f" for="ed-address">Billing address<textarea class="inp fill" id="ed-address" rows="2" style="min-height:58px">${esc(d.address)}</textarea></label>
         <div class="grid g2" style="gap:10px">
           ${T.gst ? `<label class="f" for="ed-gstin">Client GSTIN<input class="inp fill mono" id="ed-gstin" value="${esc(d.gstin)}" placeholder="27XXXXX0000X1ZX" maxlength="15"></label>`
@@ -814,8 +828,12 @@ VIEWS.editor = () => {
     <div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
         <div><h2 style="margin:0">Product photos</h2><p class="muted" style="margin:2px 0 0;font-size:13px">Printed on extra A4 pages after the ${esc(T.title.toLowerCase())}, up to 6 photos per page. Press Save after adding.</p></div>
-        <label class="btn" for="ed-photo-in" style="cursor:pointer">Add photos</label>
+        <div class="row" style="gap:8px;flex-wrap:wrap">
+          <button class="btn" type="button" id="ed-photo-cam">📷 Take photo</button>
+          <label class="btn" for="ed-photo-in" style="cursor:pointer">🖼 Choose photos</label>
+        </div>
         <input type="file" id="ed-photo-in" accept="image/*" multiple hidden>
+        <input type="file" id="ed-photo-cam-in" accept="image/*" capture="environment" hidden>
       </div>
       <div class="ph-thumbs" id="ed-photos"></div>
     </div>
@@ -862,19 +880,29 @@ AFTER.editor = () => {
   on("ed-print", "click", () => printDoc(docFromDraft()));
   on("ed-pdf", "click", () => pdfDoc(docFromDraft()));
   on("ed-save", "click", saveDoc);
-  on("ed-photo-in", "change", async e => {
-    const files = [...e.target.files]; e.target.value = "";
-    if (!files.length) return;
+  const addPhotoFiles = async (files, quiet) => {
+    if (!files.length) return 0;
     d.photos = d.photos || [];
-    toast(`Adding ${files.length} photo${files.length > 1 ? "s" : ""}…`);
+    if (!quiet) toast(`Adding ${files.length} photo${files.length > 1 ? "s" : ""}…`);
     let n = 0;
     for (const f of files) {
       try { const u = await shrinkImage(f); const id = "p" + newId(); await kv.set("img:" + id, u); S.img[id] = u; d.photos.push({id, cap: "", f: ""}); n++; }
-      catch { toast(`Couldn't read ${f.name} — is it a photo?`, true); }
+      catch { toast(`Couldn't read ${f.name || "that picture"} — is it a photo?`, true); }
     }
     persistDraft(); drawThumbs();
     if (d.tab === "preview") renderPreview();
-    if (n) toast(`${n} photo${n > 1 ? "s" : ""} added. Press Save to keep ${n > 1 ? "them" : "it"} with the document.`);
+    if (n && !quiet) toast(`${n} photo${n > 1 ? "s" : ""} added. Press Save to keep ${n > 1 ? "them" : "it"} with the document.`);
+    return n;
+  };
+  on("ed-photo-in", "change", e => { const f = [...e.target.files]; e.target.value = ""; addPhotoFiles(f); });
+  on("ed-photo-cam-in", "change", e => { const f = [...e.target.files]; e.target.value = ""; addPhotoFiles(f); });
+  on("ed-photo-cam", "click", async () => {
+    // Phones & tablets: open the phone's own camera. Computers: live webcam window.
+    const touch = matchMedia("(pointer: coarse)").matches || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    if (touch || !(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) return $("#ed-photo-cam-in").click();
+    let taken = 0;
+    await openCamera(async blob => { taken += await addPhotoFiles([blob], true); return taken; });
+    if (taken) toast(`${taken} photo${taken > 1 ? "s" : ""} added. Press Save to keep ${taken > 1 ? "them" : "it"} with the document.`);
   });
   const pb = $("#ed-photos");
   if (pb) {
@@ -1009,7 +1037,7 @@ async function saveDoc() {
   if (!body.lines.length) { toast("Add at least one line item first.", true); $("#l-desc-0")?.focus(); return; }
   if (!body.no.trim()) { toast("Give the document a number.", true); return; }
   const id = safeId(body.no);
-  const log = T.kind === "quote" ? "Quotations" : "Invoices";
+  const log = T.kind === "quote" ? "Quotations" : T.kind === "po" ? "Purchase Orders" : "Invoices";
   const clash = usedNo(body.no, d.editingId) || (S.docs.find(x => x.id === id && x.id !== d.editingId));
   if (clash) {
     await modal({title: "Number already used", body: `<p style="margin:0"><span class="mono">${esc(body.no)}</span> is already used (${esc(clash.client || "—")}, ${esc(fmtDate(clash.date))}, ${money0(clash.total)}). A number can only be used once — type a different number.</p>`, actions: [{label: "OK", value: true, cls: "primary"}]});
@@ -1019,6 +1047,7 @@ async function saveDoc() {
   body.savedAt = new Date().toISOString();
   body.notes = keep.notes || "";
   if (T.kind === "quote") { body.status = keep.status || "Sent"; body.converted = keep.converted || ""; body.followUp = keep.followUp || ""; }
+  if (T.kind === "po") body.status = keep.status || "Sent";
   const isNew = !d.editingId;
   const btn = $("#ed-save"); if (btn) btn.disabled = true;
   const ok = await write(async db => {
@@ -1043,6 +1072,7 @@ async function saveDoc() {
   if (!ok) return;
   d.editingId = id; d.no = body.no; d.noAuto = false; d.fromId = null; d.savedSig = draftSig(d);
   persistDraft(); recalc();
+  if (isNew && !$("[data-deldoc]", $("#main") || document)) { const sv = $("#ed-save"); if (sv) sv.insertAdjacentHTML("beforebegin", `<button class="btn ghost danger" data-deldoc="${esc(id)}">Delete</button>`); }
   toast(`Saved ${body.no} to ${log}.${isNew ? " Next number is ready — press New for the next one." : ""}`);
 }
 
@@ -1095,6 +1125,40 @@ function shrinkImage(file) {
     };
     im.onerror = () => { URL.revokeObjectURL(url); rej(new Error("not an image")); };
     im.src = url;
+  });
+}
+/* Live camera window for computers with a webcam. onShot(blob) is called for every photo taken. */
+async function openCamera(onShot) {
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: "environment", width: {ideal: 1920}, height: {ideal: 1080}}, audio: false}); }
+  catch (e) {
+    const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
+    toast(denied ? "Camera permission was refused — click the camera icon in the address bar to allow it, then try again." : "No camera found on this computer — use Choose photos instead.", true);
+    return;
+  }
+  return new Promise(resolve => {
+    const ov = document.createElement("div"); ov.className = "cam-ov";
+    ov.innerHTML = `<div class="cam-box" role="dialog" aria-label="Camera">
+      <video playsinline autoplay muted></video>
+      <div class="cam-acts"><span class="muted" id="cam-count" style="flex:1;font-size:13px">Point the camera at the product and press Take photo.</span>
+        <button class="btn ghost" type="button" data-x>Done</button><button class="btn primary" type="button" data-snap>📷 Take photo</button></div></div>`;
+    document.body.appendChild(ov);
+    const v = ov.querySelector("video"); v.srcObject = stream;
+    const onKey = e => { if (e.key === "Escape") close(); };
+    function close() { stream.getTracks().forEach(t => t.stop()); ov.remove(); document.removeEventListener("keydown", onKey); resolve(); }
+    document.addEventListener("keydown", onKey);
+    ov.querySelector("[data-x]").onclick = close;
+    ov.querySelector("[data-snap]").onclick = () => {
+      if (!v.videoWidth) return;
+      const cv = document.createElement("canvas"); cv.width = v.videoWidth; cv.height = v.videoHeight;
+      cv.getContext("2d").drawImage(v, 0, 0);
+      v.style.opacity = ".3"; setTimeout(() => { v.style.opacity = ""; }, 150);
+      cv.toBlob(async b => {
+        if (!b) return;
+        const n = await onShot(b);
+        const c = ov.querySelector("#cam-count"); if (c) c.textContent = `${n} photo${n > 1 ? "s" : ""} added — take another or press Done.`;
+      }, "image/jpeg", 0.92);
+    };
   });
 }
 async function drawThumbs() {
@@ -1150,7 +1214,7 @@ function docHTML(doc) {
     <div class="addr"><span>${esc([c.addr1, c.addr2].filter(Boolean).join(", "))}</span><span>${T.gst && c.gstin ? `GSTIN: <b>${esc(c.gstin)}</b>` : ""}${c.phone ? ` &nbsp;|&nbsp; Ph: ${esc(c.phone)}` : ""}${c.email ? ` &nbsp;|&nbsp; ${esc(c.email)}` : ""}</span></div>
     <div class="titleband"><h2>${esc(T.title)}</h2>${T.gst ? "" : `<span class="nogst">Not a tax invoice — GST not charged</span>`}</div>
     <div class="boxes">
-      <div><div class="lbl">Bill to</div><div class="client">${esc(doc.client)}</div>
+      <div><div class="lbl">${esc(T.party || "Bill to")}</div><div class="client">${esc(doc.client)}</div>
         <div>${esc(doc.address && doc.address !== doc.client ? doc.address : "")}</div>
         ${T.gst && doc.gstin ? `<div>GSTIN: <b>${esc(doc.gstin)}</b></div>` : ""}
         ${!T.gst && doc.contact ? `<div>Contact: ${esc(doc.contact)}</div>` : ""}
@@ -1167,12 +1231,14 @@ function docHTML(doc) {
     <tbody>${lines.map((l, i) => `<tr><td class="c">${i + 1}</td><td>${esc(l.desc)}</td>${T.gst ? `<td>${esc(l.hsn)}</td>` : ""}<td class="r">${esc(l.qty)}</td><td>${esc(l.unit)}</td><td class="r">${money(l.rate)}</td><td class="r">${money(l.amount)}</td></tr>`).join("")}
     ${Array.from({length: fillers}, () => `<tr class="fill">${"<td></td>".repeat(cols)}</tr>`).join("")}</tbody></table>
     <div class="foot">
-      <div class="pay">TOTAL PAYABLE: ₹ ${money(doc.total)} &nbsp;(${T.gst ? `${doc.supply === INTER ? "IGST" : "CGST+SGST"} @ ${gstRates} included` : "no GST charged"})<i>${esc(words(doc.total))}</i></div>
+      <div class="pay">${T.kind === "po" ? "PO VALUE" : "TOTAL PAYABLE"}: ₹ ${money(doc.total)} &nbsp;(${T.gst ? `${doc.supply === INTER ? "IGST" : "CGST+SGST"} @ ${gstRates} included` : "no GST charged"})<i>${esc(words(doc.total))}</i></div>
       <table class="tt"><tbody>${totals.map(([k, v]) => `<tr><td>${k}</td><td>${money(v)}</td></tr>`).join("")}<tr class="g"><td>${T.gst ? "GRAND TOTAL" : "TOTAL ₹"}</td><td>₹${money(doc.total)}</td></tr></tbody></table>
     </div>
     <div class="lower">
-      <div><div class="lbl">Bank details</div><div class="kv">
-        <span>Bank</span><b>${esc(c.bank)}</b><span>A/c No</span><b>${esc(c.acNo)}</b><span>Branch</span><b>${esc(c.branch)}</b><span>IFSC</span><b>${esc(c.ifsc)}</b>${c.upi ? `<span>UPI</span><b>${esc(c.upi)}</b>` : ""}</div></div>
+      ${T.kind === "po"
+        ? `<div><div class="lbl">Deliver to</div><div><b>${esc(c.name)}</b></div><div>${esc([c.addr1, c.addr2].filter(Boolean).join(", "))}</div>${c.phone ? `<div>Ph: ${esc(c.phone)}</div>` : ""}${c.gstin ? `<div>GSTIN: <b>${esc(c.gstin)}</b></div>` : ""}</div>`
+        : `<div><div class="lbl">Bank details</div><div class="kv">
+        <span>Bank</span><b>${esc(c.bank)}</b><span>A/c No</span><b>${esc(c.acNo)}</b><span>Branch</span><b>${esc(c.branch)}</b><span>IFSC</span><b>${esc(c.ifsc)}</b>${c.upi ? `<span>UPI</span><b>${esc(c.upi)}</b>` : ""}</div></div>`}
       <div><div class="lbl">Terms &amp; conditions</div><ol>${T.terms.map(x => `<li>${esc(x)}</li>`).join("")}</ol></div>
     </div>
     <div class="sign"><div><div class="for">For ${esc(c.name)}</div><div class="by">Authorised Signatory</div></div></div>
@@ -1280,7 +1346,7 @@ AFTER.quotations = () => {
       <td><input class="inp" type="date" id="qf-${esc(q.id)}" data-upd="followUp" value="${esc(q.followUp || "")}" style="width:140px"></td>
       <td><input class="inp" id="qn-${esc(q.id)}" data-upd="notes" value="${esc(q.notes || "")}" style="min-width:140px"></td>
       <td>${typeChip(q.docType)}</td>
-      <td><div class="row" style="flex-wrap:nowrap;gap:4px"><button class="btn sm" data-open="${esc(q.id)}">Open</button><button class="btn sm ghost" data-print="${esc(q.id)}">Print</button>${q.status !== "Invoiced" ? `<button class="btn sm ghost" data-convert="${esc(q.id)}">→ ${q.type === "ESTIMATE" ? "Bill" : "Invoice"}</button>` : ""}</div></td></tr>`;
+      <td><div class="row" style="flex-wrap:nowrap;gap:4px"><button class="btn sm" data-open="${esc(q.id)}">Edit</button><button class="btn sm ghost" data-print="${esc(q.id)}">Print</button><button class="btn sm ghost danger" data-deldoc="${esc(q.id)}">Delete</button>${q.status !== "Invoiced" ? `<button class="btn sm ghost" data-convert="${esc(q.id)}">→ ${q.type === "ESTIMATE" ? "Bill" : "Invoice"}</button>` : ""}</div></td></tr>`;
     }).join("") : `<tr><td colspan="14" class="empty">${loading() ? "Loading…" : all.length ? "Nothing matches these filters." : "No quotations yet — save a Quote or Estimate and it lands here."}</td></tr>`;
   };
   bindFilters(["q-search", "q-status", "q-type"], S.qf, draw);
@@ -1343,7 +1409,7 @@ AFTER.invoices = () => {
       <td>${fmtDate(i.due)}</td><td>${statusPill(i.status)}</td><td class="n ${i.overdue ? "bad-t" : ""}">${i.overdue === "" ? "" : i.overdue}</td>
       <td><input class="inp" id="in-${esc(i.id)}" data-upd="notes" value="${esc(i.notes || "")}" style="min-width:140px"></td>
       <td>${typeChip(i.docType)}</td>
-      <td><div class="row" style="flex-wrap:nowrap;gap:4px"><button class="btn sm" data-open="${esc(i.id)}">Open</button><button class="btn sm ghost" data-print="${esc(i.id)}">Print</button>${i.balance > 0 ? `<button class="btn sm ghost" data-pay="${esc(i.no)}">+ Payment</button>` : ""}</div></td></tr>`).join("")
+      <td><div class="row" style="flex-wrap:nowrap;gap:4px"><button class="btn sm" data-open="${esc(i.id)}">Edit</button><button class="btn sm ghost" data-print="${esc(i.id)}">Print</button><button class="btn sm ghost danger" data-deldoc="${esc(i.id)}">Delete</button>${i.balance > 0 ? `<button class="btn sm ghost" data-pay="${esc(i.no)}">+ Payment</button>` : ""}</div></td></tr>`).join("")
       : `<tr><td colspan="17" class="empty">${loading() ? "Loading…" : all.length ? "Nothing matches these filters." : "No invoices yet — save an Invoice or Bill and it lands here."}</td></tr>`;
   };
   bindFilters(["i-search", "i-status", "i-type"], S.if, draw);
@@ -1352,6 +1418,62 @@ AFTER.invoices = () => {
     ["Invoice No.", "Date", "Client", "Vertical", "What it's for", "Taxable", "GST", "Total", "Cost", "Margin", "Received", "Balance", "Due Date", "Status", "Days Overdue", "Notes", "Doc Type"],
     invoices().map(i => [i.no, i.date, i.client, i.vertical, i.summary, i.taxable, i.gstAmt, i.total, i.cost, i.margin, i.received, i.balance, i.due, i.status, i.overdue, i.notes, i.docType])));
 };
+
+/* =====================================================================
+   PURCHASE ORDERS
+   ===================================================================== */
+S.pf = {"p-search": "", "p-status": ""};
+VIEWS.pos = () => `
+  <div class="head"><div><div class="eyebrow">Log</div><h1>Purchase Orders</h1><p>Fills itself when you save a Purchase Order. These are things you buy — they don't count as sales.</p></div>
+    <div class="row"><button class="btn" data-go="PO">New purchase order</button>${csvBtn("p-csv")}</div></div>
+  <div id="p-stats"></div>
+  <div class="row">
+    <input class="inp search" id="p-search" placeholder="Search supplier, number, item" value="${esc(S.pf["p-search"])}">
+    <select class="inp" id="p-status" style="width:auto">${optList(PO_STATUS, S.pf["p-status"], "Any status")}</select>
+  </div>
+  <div class="tbl-wrap"><table class="t"><thead><tr><th>PO no.</th><th>Date</th><th>Supplier</th><th>What it's for</th><th class="n">Taxable ₹</th><th class="n">GST ₹</th><th class="n">Total ₹</th><th>Deliver by</th><th>Status</th><th>Notes</th><th></th></tr></thead><tbody id="p-body"></tbody></table></div>`;
+AFTER.pos = () => {
+  const draw = () => {
+    const f = S.pf, all = pos(), today = todayISO();
+    const rows = all.filter(o => match(f["p-search"], o.client, o.no, o.summary) && (!f["p-status"] || (o.status || "Sent") === f["p-status"]));
+    const open = all.filter(o => ["Draft", "Sent", "Confirmed"].includes(o.status || "Sent"));
+    const late = open.filter(o => (o.due || "") && o.due < today);
+    $("#p-stats").innerHTML = `<div class="grid g4">
+      <div class="stat"><span class="k">Purchase orders</span><span class="v">${all.length}</span></div>
+      <div class="stat"><span class="k">Waiting for delivery</span><span class="v">${money0(open.reduce((s, o) => s + num(o.total), 0))}</span><span class="s">${open.length} open</span></div>
+      <div class="stat"><span class="k">Received</span><span class="v">${all.filter(o => o.status === "Received").length}</span></div>
+      <div class="stat ${late.length ? "alert" : ""}"><span class="k">Late deliveries</span><span class="v">${late.length}</span><span class="s">past the deliver-by date</span></div></div>`;
+    $("#p-body").innerHTML = rows.length ? rows.map(o => `<tr data-id="${esc(o.id)}">
+      <td class="mono">${esc(o.no)}</td><td>${fmtDate(o.date)}</td><td>${esc(o.client)}</td><td class="wrap">${esc(o.summary)}</td>
+      <td class="n">${money(o.taxable)}</td><td class="n">${money(o.gstAmt)}</td><td class="n"><b>${money(o.total)}</b></td>
+      <td class="${o.due && o.due < today && ["Draft", "Sent", "Confirmed"].includes(o.status || "Sent") ? "bad-t" : ""}">${fmtDate(o.due)}</td>
+      <td><select class="inp" id="ps-${esc(o.id)}" data-upd="status" style="width:auto">${optList(PO_STATUS, o.status || "Sent")}</select></td>
+      <td><input class="inp" id="pn-${esc(o.id)}" data-upd="notes" value="${esc(o.notes || "")}" style="min-width:140px"></td>
+      <td><div class="row" style="flex-wrap:nowrap;gap:4px"><button class="btn sm" data-open="${esc(o.id)}">Edit</button><button class="btn sm ghost" data-print="${esc(o.id)}">Print</button><button class="btn sm ghost danger" data-deldoc="${esc(o.id)}">Delete</button></div></td></tr>`).join("")
+      : `<tr><td colspan="11" class="empty">${loading() ? "Loading…" : all.length ? "Nothing matches these filters." : "No purchase orders yet — make one from Purchase Order and it lands here."}</td></tr>`;
+  };
+  bindFilters(["p-search", "p-status"], S.pf, draw);
+  draw();
+  $("#p-csv")?.addEventListener("click", () => csvSave("Purchase Orders.csv",
+    ["PO No.", "Date", "Supplier", "What it's for", "Taxable", "GST", "Total", "Deliver By", "Status", "Notes"],
+    pos().map(o => [o.no, o.date, o.client, o.summary, o.taxable, o.gstAmt, o.total, o.due, o.status, o.notes])));
+};
+
+/* Delete a saved quotation / invoice / bill / purchase order (from the lists or the editor) */
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-deldoc]"); if (!b) return;
+  e.preventDefault();
+  const doc = S.docs.find(x => x.id === b.dataset.deldoc); if (!doc) return toast("That document is already gone.", true);
+  const paid = S.payments.filter(p => p.against && p.against === doc.no);
+  const paidAmt = paid.reduce((s, p) => s + num(p.amount), 0);
+  const extra = paid.length ? `<br><br><b>${paid.length} payment${paid.length > 1 ? "s" : ""} (${money0(paidAmt)})</b> recorded against it will stay on the Payments page — delete ${paid.length > 1 ? "those" : "that"} there too if ${paid.length > 1 ? "they were" : "it was"} wrong.` : "";
+  if (!(await confirmBox(`Delete ${doc.no}?`, `This removes <span class="mono">${esc(doc.no)}</span> (${esc(doc.client || "—")}, ${money0(doc.total)}) from this device and, after the next sync, from Google and every other device. It can't be undone.${extra}`, "Delete it", true))) return;
+  const ok = await write(db => db.doc("docs/" + doc.id).delete(), `Deleted ${doc.no}.`);
+  if (!ok) return;
+  for (const t in S.drafts) if (S.drafts[t].editingId === doc.id) S.drafts[t] = {...blankDraft(), tab: "edit"};
+  persistDraft();
+  if (S.view === "editor") render();
+});
 
 /* =====================================================================
    PAYMENTS
@@ -1802,7 +1924,7 @@ const CONFIG = {
   GOOGLE_CLIENT_ID: "906950619673-treueirc5fommes2r2disej8vpdoo42j.apps.googleusercontent.com",                 // e.g. "1234567890-abc123.apps.googleusercontent.com"
   SHEET_NAME: "VD Enterprise Desk Data" // the Google Sheet created in the user's Drive
 };
-const APP_VERSION = "9 (5 Nov 2026)";
+const APP_VERSION = "11 (6 Nov 2026)";
 const SCOPES = "openid email profile https://www.googleapis.com/auth/drive.file";
 /* Small on-screen sync log (Google & backup screen) — helps find problems on phones */
 const SYNCLOG = [];
@@ -1844,7 +1966,7 @@ const kv = (() => {
   };
 })();
 
-const blankL = () => ({email: "", settings: null, settingsU: "", coll: {clients: {}, ratecard: {}, docs: {}, payments: {}, expenses: {}}, lastSync: "", sheetId: "", photoFolder: "", lastBackup: "", dirty: false});
+const blankL = () => ({email: "", settings: null, settingsU: "", coll: {clients: {}, ratecard: {}, docs: {}, payments: {}, expenses: {}}, lastSync: "", sheetId: "", photoFolder: "", lastBackup: "", dirty: false, tomb: {}});
 const L = blankL();
 S.sync = {state: "idle", msg: "", at: 0};
 
@@ -1879,7 +2001,7 @@ S.db = {
         }
         touchLocal();
       },
-      async delete() { if (L.coll[c] && L.coll[c][id]) { L.coll[c][id] = {_del: true, _u: nowISO()}; touchLocal(); } }
+      async delete() { if (L.coll[c] && L.coll[c][id]) { const t = nowISO(); L.coll[c][id] = {_del: true, _u: t}; (L.tomb = L.tomb || {})[c + "/" + id] = t; touchLocal(); } }
     };
   },
   collection(c) { return { async add(data) { const id = newId(); L.coll[c][id] = {...strip(data), _u: nowISO()}; touchLocal(); return {id}; } }; }
@@ -2049,6 +2171,7 @@ async function readAll() {
   if (sm.company) {
     try { out.settings = {company: JSON.parse(sm.company), defaults: JSON.parse(sm.defaults || "{}"), series: JSON.parse(sm.series || "{}"), lists: JSON.parse(sm.lists || "{}")}; out.settingsU = String(sm.updatedAt || ""); } catch { out.settings = null; }
   }
+  try { out.tomb = sm.deleted ? JSON.parse(sm.deleted) : {}; } catch { out.tomb = {}; }
   COLLS.forEach((c, i) => {
     const rows = vr[i + 1]?.values || [];
     out.coll[c] = {}; out.empty[c] = rows.length <= 1;
@@ -2066,9 +2189,10 @@ async function writeAll() {
   const st = L.settings || FALLBACK_SETTINGS;
   const data = [{range: q1("Settings") + "!A1", values: [
     ["Key", "Value (managed by the app — change these on the app's Settings screen)"],
-    ["company", JSON.stringify(st.company)], ["defaults", JSON.stringify(st.defaults)], ["series", JSON.stringify(st.series)], ["lists", JSON.stringify(st.lists)], ["updatedAt", L.settingsU || ""]
+    ["company", JSON.stringify(st.company)], ["defaults", JSON.stringify(st.defaults)], ["series", JSON.stringify(st.series)], ["lists", JSON.stringify(st.lists)], ["updatedAt", L.settingsU || ""],
+    ["deleted", JSON.stringify(L.tomb || {})]
   ]}];
-  const tails = [q1("Settings") + "!A7:Z"];
+  const tails = [q1("Settings") + "!A8:Z"];
   for (const c of COLLS) {
     const rows = Object.entries(L.coll[c]).filter(([, r]) => !r._del).sort((a, b) => (a[1].date || a[1].name || a[1].item || "").localeCompare(b[1].date || b[1].name || b[1].item || "")).map(([id, r]) => toRow(c, id, r));
     data.push({range: q1(SPEC[c].tab) + "!A1", values: [headerOf(c), ...rows]});
@@ -2124,6 +2248,21 @@ function syncLocked(interactive) {
           if (s && b > num(s.next)) { s.next = b; pulled++; }
         }
       }
+      // Deleted records (from any device) — so a delete can't be undone by another device's old copy
+      const tomb = {...(R.tomb || {})};
+      for (const [k, t] of Object.entries(L.tomb || {})) { if (!tomb[k] || t > tomb[k]) { tomb[k] = t; push = true; } }
+      const cutoff = new Date(Date.now() - 180 * 864e5).toISOString();
+      for (const [k, t] of Object.entries(tomb)) {
+        const [c, ...rest] = k.split("/"), id = rest.join("/");
+        if (!L.coll[c]) { delete tomb[k]; continue; }
+        const l = L.coll[c][id], r = R.coll[c][id];
+        if (r && (r._u || "") > t) { delete tomb[k]; push = true; continue; }          // made again after the delete
+        if (l && !l._del && (l._u || "") > t) { delete tomb[k]; push = true; continue; }
+        if (r) { delete R.coll[c][id]; push = true; }                                     // still in the Sheet → take it out
+        if (l) { if (!l._del) pulled++; delete L.coll[c][id]; }                            // deleted on another device
+        if (t < cutoff) { delete tomb[k]; push = true; }
+      }
+      L.tomb = tomb;
       for (const c of COLLS) {
         const loc = L.coll[c], rem = R.coll[c];
         for (const id of new Set([...Object.keys(loc), ...Object.keys(rem)])) {
