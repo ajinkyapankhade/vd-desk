@@ -534,7 +534,7 @@ const TYPES = {
              terms: ["Please mention our PO number on your invoice and delivery challan.","Goods must match the description, quantity and rate above.","Deliver by the date shown above to the delivery address.","Payment as agreed, after goods are received in good condition.","Subject to Chh. Sambhajinagar jurisdiction."]},
 };
 const PO_STATUS = ["Draft", "Sent", "Confirmed", "Received", "Cancelled"];
-const LINES = 15;
+const LINES = 15;   // most line items one document can have (they fit one A4 page)
 const INTRA = "Intra-State (CGST+SGST)", INTER = "Inter-State (IGST)";
 
 /* =====================================================================
@@ -805,16 +805,19 @@ function lookupOut() {
    ===================================================================== */
 S.drafts = {};
 function blankLine() { return {desc: "", hsn: "", qty: "", unit: "", rate: "", gst: num(set().defaults.gst ?? 0.18)}; }
+/* v12.1: a document starts with one line; "+ Add line item" adds more. Fully empty rows are dropped. */
+const lineEmpty = l => !["desc", "hsn", "qty", "unit", "rate"].some(f => String(l[f] ?? "").trim());
+function compactLines(lines) { const a = (lines || []).filter(l => !lineEmpty(l)).slice(0, LINES); return a.length ? a : [blankLine()]; }
 function blankDraft() {
   return {client: "", address: "", gstin: "", pos: "", contact: "", no: "", noAuto: true, date: todayISO(), supply: INTRA,
           vertical: (set().lists.verticals || ["Printing"])[0], ref: "", poNo: "", poDate: "", discount: 0,
-          lines: Array.from({length: LINES}, blankLine), photos: [], editingId: null, fromId: null, tab: "edit"};
+          lines: [blankLine()], photos: [], editingId: null, fromId: null, tab: "edit"};
 }
 function draft(t = S.edType) {
   if (!S.drafts[t]) {
     const saved = ls.get("draft:" + t, null);
     S.drafts[t] = saved && Array.isArray(saved.lines) ? {...blankDraft(), ...saved} : blankDraft();
-    while (S.drafts[t].lines.length < LINES) S.drafts[t].lines.push(blankLine());
+    S.drafts[t].lines = compactLines(S.drafts[t].lines);
   }
   return S.drafts[t];
 }
@@ -944,7 +947,7 @@ VIEWS.editor = () => {
       </div>
     </div>
     <div class="lines-wrap"><table class="lines" id="ed-lines">
-      <thead><tr><th class="sr">Sr</th><th style="width:34%">Description of goods / service</th>${T.gst ? `<th style="width:8%">HSN/SAC</th>` : ""}<th style="width:7%">Qty</th><th style="width:8%">Unit</th><th style="width:9%">Rate ₹</th><th style="text-align:right;width:10%">Amount ₹</th>
+      <thead><tr><th class="sr">Sr</th><th style="width:34%">Description of goods / service</th>${T.gst ? `<th style="width:8%">HSN/SAC</th>` : ""}<th style="width:7%">Qty</th><th style="width:8%">Unit</th><th style="width:9%">Rate ₹</th><th style="text-align:right;width:10%">Amount ₹</th><th class="rm" aria-label="Remove line"></th>
       ${T.gst ? `<th class="h first">GST %</th>` : ""}<th class="h ${T.gst ? "" : "first"}" style="text-align:right">Card rate</th><th class="h" style="text-align:right">Last → this client</th><th class="h" style="text-align:right">Last → any</th><th class="h" style="text-align:right">Cost ₹</th></tr></thead>
       <tbody>${d.lines.map((l, i) => `<tr data-row="${i}">
         <td class="sr" id="sr-${i}"></td>
@@ -954,9 +957,13 @@ VIEWS.editor = () => {
         <td><input class="inp fill" id="l-unit-${i}" data-f="unit" data-v="unit" list="dl-units" aria-label="Unit, line ${i + 1}" value="${esc(l.unit)}"></td>
         <td><input class="inp fill num" id="l-rate-${i}" data-f="rate" data-v="rate" inputmode="decimal" aria-label="Rate, line ${i + 1}" value="${esc(l.rate)}"></td>
         <td class="amt" id="amt-${i}"></td>
+        <td class="rm"><button class="btn sm ghost" type="button" data-rmline="${i}" title="Remove this line" aria-label="Remove line ${i + 1}">✕</button></td>
         ${T.gst ? `<td class="h first" style="padding:3px 4px"><select class="inp" id="l-gst-${i}" data-f="gst" style="background:transparent;border-color:transparent;min-width:74px">${gstOpts(l.gst)}</select></td>` : ""}
         <td class="h ${T.gst ? "" : "first"}" id="hc-${i}"></td><td class="h" id="hl-${i}"></td><td class="h" id="ha-${i}"></td><td class="h" id="hk-${i}"></td>
       </tr>`).join("")}</tbody></table></div>
+    <div class="row" style="gap:10px;margin-top:-6px">${d.lines.length < LINES
+      ? `<button class="btn" type="button" id="ed-addline">+ Add line item</button><span class="muted" style="font-size:13px">${d.lines.length} of ${LINES} lines · Enter on the last line adds the next one</span>`
+      : `<span class="muted" style="font-size:13px">${LINES} lines — the most that fit on one A4 page.</span>`}</div>
     <div class="checks" id="ed-checks" role="status" aria-live="polite"></div>
     <div class="tot-grid">
       <div class="card" style="display:flex;flex-direction:column;gap:12px">
@@ -1015,6 +1022,25 @@ AFTER.editor = () => {
     const i = +e.target.closest("tr").dataset.row;
     d.lines[i][f] = f === "gst" ? num(e.target.value) : e.target.value; touch();
   });
+  tb.addEventListener("click", e => {
+    const b = e.target.closest("[data-rmline]"); if (!b) return;
+    const i = +b.dataset.rmline;
+    if (d.lines.length > 1) d.lines.splice(i, 1); else d.lines[0] = blankLine();
+    persistDraft(); render();
+    const f = $("#l-desc-" + Math.min(i, d.lines.length - 1)); if (f) f.focus();
+  });
+  tb.addEventListener("keydown", e => {
+    if (e.key !== "Enter" || e.target.tagName !== "INPUT" || e.isComposing) return;
+    const i = +e.target.closest("tr").dataset.row;
+    if (i !== d.lines.length - 1 || lineEmpty(d.lines[i])) return;
+    e.preventDefault(); addLine();
+  });
+  on("ed-addline", "click", () => addLine());
+  function addLine() {
+    if (d.lines.length >= LINES) return toast(`${LINES} lines is the most that fit on one A4 page.`, true);
+    d.lines.push(blankLine()); persistDraft(); render();
+    const f = $("#l-desc-" + (d.lines.length - 1)); if (f) { f.focus(); f.scrollIntoView({block: "center"}); }
+  }
   tb.addEventListener("change", e => {
     if (e.target.dataset.f !== "desc") return;
     const i = +e.target.closest("tr").dataset.row;
@@ -1226,7 +1252,7 @@ async function copyAcross() {
   const src = docNo(from);
   S.drafts[to] = {...blankDraft(), client: d.client, address: d.address, gstin: d.gstin, pos: d.pos, contact: d.contact, vertical: d.vertical,
     supply: d.supply, ref: src, fromId: d.editingId || null,
-    lines: d.lines.map(l => ({...l, hsn: TYPES[to].gst ? l.hsn : ""})), photos: (d.photos || []).map(p => ({...p}))};
+    lines: compactLines(d.lines.map(l => ({...l, hsn: TYPES[to].gst ? l.hsn : ""}))), photos: (d.photos || []).map(p => ({...p}))};
   persistDraft();
   go(to, {keep: true});
   toast(`${from === "QUOTE" ? "Quote" : "Estimate"} ${src} copied into the ${to.toLowerCase()}. Check it, then Save.`);
@@ -1290,10 +1316,9 @@ async function openDoc(doc) {
   const t = doc.type, cur = draft(t);
   if (!cur.editingId && cur.lines.some(l => String(l.desc).trim()) && !(await confirmBox(`Replace the ${t.toLowerCase()} in progress?`, "The form has unsaved lines. Opening this document replaces them.", "Open it", true))) return;
   const lines = (doc.lines || []).map(l => ({desc: l.desc, hsn: l.hsn || "", qty: String(l.qty ?? ""), unit: l.unit || "", rate: String(l.rate ?? ""), gst: l.gst ?? num(set().defaults.gst)}));
-  while (lines.length < LINES) lines.push(blankLine());
   S.drafts[t] = {...blankDraft(), client: doc.client || "", address: doc.address || "", gstin: doc.gstin || "", pos: doc.pos || "", contact: doc.contact || "",
     no: doc.no, noAuto: false, date: doc.date || todayISO(), supply: doc.supply || INTRA, vertical: doc.vertical || "Printing", ref: doc.ref || "", poNo: doc.poNo || "", poDate: doc.poDate || "",
-    discount: doc.discount || 0, lines, photos: (doc.photos || []).map(p => ({...p})), editingId: doc.id};
+    discount: doc.discount || 0, lines: compactLines(lines), photos: (doc.photos || []).map(p => ({...p})), editingId: doc.id};
   S.drafts[t].savedSig = draftSig(S.drafts[t]);
   persistDraft(); go(t, {keep: true});
 }
@@ -1584,8 +1609,7 @@ document.addEventListener("click", e => {
     const q = S.docs.find(x => x.id === c.dataset.convert); if (!q) return;
     const to = TYPES[q.type].pair;
     const lines = (q.lines || []).map(l => ({desc: l.desc, hsn: TYPES[to].gst ? l.hsn || "" : "", qty: String(l.qty ?? ""), unit: l.unit || "", rate: String(l.rate ?? ""), gst: l.gst ?? num(set().defaults.gst)}));
-    while (lines.length < LINES) lines.push(blankLine());
-    S.drafts[to] = {...blankDraft(), client: q.client, address: q.address || "", gstin: q.gstin || "", pos: q.pos || "", contact: q.contact || "", vertical: q.vertical || "Printing", supply: q.supply || INTRA, ref: q.no, fromId: q.id, lines, discount: q.discount || 0};
+    S.drafts[to] = {...blankDraft(), client: q.client, address: q.address || "", gstin: q.gstin || "", pos: q.pos || "", contact: q.contact || "", vertical: q.vertical || "Printing", supply: q.supply || INTRA, ref: q.no, fromId: q.id, lines: compactLines(lines), discount: q.discount || 0};
     persistDraft(); go(to);
     toast(`${q.no} copied into a new ${to.toLowerCase()}. Check it, then Save.`);
   }
@@ -2630,6 +2654,9 @@ details.setup[open] summary{margin-bottom:10px}
 .scan-prev img{max-width:240px;max-height:160px;border-radius:8px;border:1px solid var(--line);object-fit:contain;background:var(--sunk)}
 .scan-prev textarea.inp{min-height:110px;font:12.5px/1.4 var(--f-mono,monospace)}
 .role-seg button{min-width:96px}
+table.lines td.rm,table.lines th.rm{width:34px;padding:0 2px;text-align:center}
+table.lines td.rm .btn{padding:4px 7px;color:var(--muted)}
+table.lines td.rm .btn:hover{color:var(--bad)}
 </style>
 <div id="gate" hidden></div>
 <input type="file" id="file-import" accept=".json,application/json" hidden>
@@ -2645,7 +2672,7 @@ const CONFIG = {
   GOOGLE_CLIENT_ID: "906950619673-treueirc5fommes2r2disej8vpdoo42j.apps.googleusercontent.com",                 // e.g. "1234567890-abc123.apps.googleusercontent.com"
   SHEET_NAME: "VD Enterprise Desk Data" // the Google Sheet created in the user's Drive
 };
-const APP_VERSION = "12 (10 Nov 2026)";
+const APP_VERSION = "12.1 (10 Nov 2026)";
 const SCOPES = "openid email profile https://www.googleapis.com/auth/drive.file";
 /* Small on-screen sync log (Google & backup screen) — helps find problems on phones */
 const SYNCLOG = [];
