@@ -661,7 +661,7 @@ const confirmBox = async (title, body, yes = "Yes", danger) => (await modal({tit
 const NAV = [
   {h: "Make a document", items: [["lookup", "Lookup"], ["QUOTE", "Quote", "GST"], ["INVOICE", "Invoice", "GST"], ["ESTIMATE", "Estimate", "NO GST"], ["BILL", "Bill", "NO GST"], ["PO", "Purchase Order", "BUY"]]},
   {h: "Keep the records", items: [["quotations", "Quotations"], ["invoices", "Invoices"], ["pos", "Purchase Orders"], ["payments", "Payments"], ["expenses", "Expenses"]]},
-  {h: "See how you're doing", items: [["dashboard", "Dashboard"]]},
+  {h: "See how you're doing", items: [["dashboard", "Dashboard"], ["gst", "GST filing", "MONTHLY"]]},
   {h: "Reference", items: [["clients", "Clients"], ["ratecard", "Rate Card"], ["history", "Rate History"], ["settings", "Settings"], ["sync", "Google & backup"]]},
 ];
 const REG_MARK = `<svg width="30" height="30" viewBox="0 0 30 30" aria-hidden="true"><circle cx="15" cy="15" r="8.5" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M15 1v28M1 15h28" stroke="currentColor" stroke-width="1.6"/><path d="M15 6.5a8.5 8.5 0 0 1 8.5 8.5H15z" fill="#00A3DA"/><path d="M23.5 15a8.5 8.5 0 0 1-8.5 8.5V15z" fill="#E6007E"/><path d="M15 23.5A8.5 8.5 0 0 1 6.5 15H15z" fill="#FFD400"/></svg>`;
@@ -710,6 +710,7 @@ VIEWS.home = () => {
   const todo = [
     [!!c.phone && !!c.email && !!c.upi, `Phone, email and UPI ID on <a href="#" data-go="settings">Settings</a> — they print on every document.`],
     [noCost === 0, `Cost for your top items on the <a href="#" data-go="ratecard">Rate Card</a> — ${noCost} of ${S.ratecard.length} have none, so the margin box stays empty.`],
+    gstHomeTodo(),
     [noGstin === 0, `GSTIN for clients — ${noGstin} of ${S.clients.length} are blank on <a href="#" data-go="clients">Clients</a>. A tax invoice is incomplete without it.`],
   ];
   const recent = appDocs().sort((a, b) => (b.savedAt || "").localeCompare(a.savedAt || "")).slice(0, 6);
@@ -1275,6 +1276,11 @@ async function saveDoc() {
     $("#ed-no")?.focus(); return;
   }
   const keep = (d.editingId && S.docs.find(x => x.id === d.editingId)) || {};
+  if (t === "INVOICE" && !(d.savedSig && draftSig(d) === d.savedSig)) {   // GSTR-1 already filed for this month?
+    const was = keep.id && ymOf(keep.date) !== ymOf(body.date) ? keep : null;
+    if (!(await gstFiledGuard({...body, type: t}, "save"))) return;
+    if (was && !(await gstFiledGuard(was, "save"))) return;
+  }
   body.savedAt = new Date().toISOString();
   body.notes = keep.notes || "";
   if (T.kind === "quote") { body.status = keep.status || "Sent"; body.converted = keep.converted || ""; body.followUp = keep.followUp || ""; }
@@ -1703,6 +1709,7 @@ document.addEventListener("click", async e => {
   const b = e.target.closest("[data-deldoc]"); if (!b) return;
   e.preventDefault();
   const doc = S.docs.find(x => x.id === b.dataset.deldoc); if (!doc) return toast("That document is already gone.", true);
+  if (!(await gstFiledGuard(doc, "delete"))) return;
   const paid = S.payments.filter(p => p.against && p.against === doc.no);
   const paidAmt = paid.reduce((s, p) => s + num(p.amount), 0);
   const extra = paid.length ? `<br><br><b>${paid.length} payment${paid.length > 1 ? "s" : ""} (${money0(paidAmt)})</b> recorded against it will stay on the Payments page — delete ${paid.length > 1 ? "those" : "that"} there too if ${paid.length > 1 ? "they were" : "it was"} wrong.` : "";
@@ -1800,64 +1807,122 @@ document.addEventListener("click", async e => {
    EXPENSES
    ===================================================================== */
 S.ef = {"e-search": "", "e-cat": ""};
+/* Supplier GSTIN for an expense: typed on the expense (v14), else from the matching Client */
+function expGstin(x) {
+  const g = String(x.gstin || "").trim().toUpperCase();
+  if (g && !gstinProblem(g)) return g;
+  const c = S.idx.client.get(key(x.vendor));
+  return c && c.gstin && !gstinProblem(c.gstin) ? String(c.gstin).toUpperCase() : "";
+}
+/* GST of an expense split into IGST or CGST+SGST by the supplier's state */
+function expSplit(x) {
+  const t = num(x.gstAmt), g = expGstin(x), inter = !!g && g.slice(0, 2) !== ownStateCode();
+  return {gstin: g, igst: inter ? t : 0, cgst: inter ? 0 : rnd(t / 2), sgst: inter ? 0 : rnd(t - rnd(t / 2))};
+}
+function expenseFields(x, pre) {
+  const L = set().lists;
+  return `<div class="grid g4">
+      <label class="f" for="${pre}date">Date<input class="inp fill" type="date" id="${pre}date" data-req="1" value="${esc(x.date || todayISO())}"></label>
+      <label class="f" for="${pre}vertical">Vertical<select class="inp fill" id="${pre}vertical">${optList(L.verticals, x.vertical || L.verticals?.[0])}</select></label>
+      <label class="f" for="${pre}category">Category<select class="inp fill" id="${pre}category">${optList(L.categories, x.category || "", "Pick one")}</select></label>
+      <label class="f" for="${pre}vendor">Paid to / supplier<input class="inp fill" id="${pre}vendor" list="dl-clients" autocomplete="off" value="${esc(x.vendor || "")}"></label>
+      <label class="f" for="${pre}gstin">Supplier GSTIN<input class="inp fill mono" id="${pre}gstin" data-v="gstin" maxlength="15" autocomplete="off" placeholder="from their bill" value="${esc(x.gstin || "")}"></label>
+      <label class="f" for="${pre}billno">Bill no.<input class="inp fill mono" id="${pre}billno" data-v="ref" value="${esc(x.billNo || "")}"></label>
+      <label class="f" for="${pre}billdate">Bill date<input class="inp fill" type="date" id="${pre}billdate" value="${esc(x.billDate || "")}"></label>
+      <label class="f" for="${pre}from">Paid from<select class="inp fill" id="${pre}from">${optList(L.accounts, x.paidFrom || "", "—")}</select></label>
+      <label class="f" for="${pre}desc" style="grid-column:span 2">Description<input class="inp fill" id="${pre}desc" value="${esc(x.desc || "")}"></label>
+      <label class="f" for="${pre}amount">Amount ₹ (incl. GST)<input class="inp fill num" id="${pre}amount" data-v="money" data-req="1" inputmode="decimal" value="${esc(x.amount ?? "")}"></label>
+      <label class="f" for="${pre}gst">GST %<select class="inp fill" id="${pre}gst">${(L.gstRates || []).map(g => `<option value="${g}" ${num(g) === num(x.gst ?? 0.18) ? "selected" : ""}>${Math.round(num(g) * 100)}%</option>`).join("")}</select></label>
+      <label class="f" for="${pre}linked">Linked job / invoice<input class="inp fill mono" id="${pre}linked" list="dl-invnos" value="${esc(x.linked || "")}"></label>
+      <label class="f" for="${pre}notes" style="grid-column:span 3">Notes<input class="inp fill" id="${pre}notes" value="${esc(x.notes || "")}"></label>
+    </div>
+    <div class="row" style="margin-top:8px"><span class="muted" id="${pre}split" style="font-size:13px"></span></div>`;
+}
+/* Wire one expense form: GSTIN from the supplier on Clients, live GST split. Returns a reader for the values. */
+function wireExpenseForm(root, pre, keepGst) {
+  const q = id => $("#" + pre + id, root);
+  const showSplit = () => {
+    const a = num(q("amount").value), g = num(q("gst").value), s = keepGst && a === num(keepGst.amount) && g === num(keepGst.gst) ? {gstAmt: num(keepGst.gstAmt), basic: num(keepGst.basic)} : splitGst(a, g);
+    const sp = expSplit({gstAmt: s.gstAmt, gstin: q("gstin").value, vendor: q("vendor").value});
+    q("split").textContent = !a ? "" : !s.gstAmt ? `No GST · basic ₹${money(s.basic)}`
+      : `GST ₹${money(s.gstAmt)} = ${sp.igst ? `IGST ₹${money(sp.igst)}` : `CGST ₹${money(sp.cgst)} + SGST ₹${money(sp.sgst)}`} · basic ₹${money(s.basic)}${sp.gstin ? "" : " · no supplier GSTIN → no input credit"}`;
+  };
+  q("vendor").addEventListener("change", () => {
+    const c = S.idx.client.get(key(q("vendor").value));
+    if (c && c.gstin && !q("gstin").value.trim()) { q("gstin").value = c.gstin; markField(q("gstin"), ""); }
+    showSplit();
+  });
+  for (const id of ["amount", "gst", "gstin", "vendor"]) q(id).addEventListener("input", showSplit);
+  showSplit();
+  return () => {
+    const g = id => q(id).value.trim();
+    const errs = vCheck(root); if (errs.length) { vFail(errs, root); return null; }
+    const amount = num(g("amount")), gst = num(g("gst"));
+    if (!amount) { toast("Enter the amount.", true); return null; }
+    if (g("date") > todayISO()) { toast("The expense date is in the future — check it.", true); return null; }
+    if (g("billdate") && g("billdate") > todayISO()) { toast("The bill date is in the future — check it.", true); return null; }
+    if (!g("category")) { toast("Pick a category.", true); return null; }
+    const gi = g("gstin").toUpperCase();
+    if (gi && gi === String(set().company.gstin || "").toUpperCase()) { markField(q("gstin"), "That's your own GSTIN."); toast("The supplier GSTIN is your own GSTIN.", true); return null; }
+    const s = keepGst && amount === num(keepGst.amount) && gst === num(keepGst.gst) ? {gstAmt: num(keepGst.gstAmt), basic: num(keepGst.basic)} : splitGst(amount, gst);
+    return {date: g("date") || todayISO(), vertical: g("vertical"), category: g("category"), vendor: g("vendor"), gstin: gi, billNo: g("billno"), billDate: g("billdate"),
+      desc: g("desc"), paidFrom: g("from"), amount, gst, gstAmt: s.gstAmt, basic: s.basic, linked: g("linked"), notes: g("notes")};
+  };
+}
+async function editExpense(x) {
+  let read;
+  const p = modal({title: `Edit expense · ${x.vendor || fmtDate(x.date)}`, body: expenseFields(x, "xe-"), actions: [{label: "Cancel", value: false, cls: "ghost"},
+    {label: "Save changes", value: true, cls: "primary", collect: () => read() || false}]});
+  read = wireExpenseForm($(".modal"), "xe-", x);
+  const r = await p;
+  if (!r?.value) return;
+  write(db => db.doc("expenses/" + x.id).set({...x, ...r.data}), "Expense updated.");
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-editexp]"); if (!b) return;
+  const x = S.expenses.find(z => z.id === b.dataset.editexp); if (x) editExpense(x);
+});
 VIEWS.expenses = () => {
   const L = set().lists;
   return `
-  <div class="head"><div><div class="eyebrow">Money out</div><h1>Expenses</h1><p>Every rupee spent, with GST split out for your input credit. Drives the profit and GST figures on the Dashboard.</p></div><div class="row">${csvBtn("e-csv")}</div></div>
-  <div class="card" id="e-form"><h2>Add an expense</h2>
-    <div class="grid g4">
-      <label class="f" for="ef-date">Date<input class="inp fill" type="date" id="ef-date" data-req="1" value="${todayISO()}"></label>
-      <label class="f" for="ef-vertical">Vertical<select class="inp fill" id="ef-vertical">${optList(L.verticals, L.verticals?.[0])}</select></label>
-      <label class="f" for="ef-category">Category<select class="inp fill" id="ef-category">${optList(L.categories, "", "Pick one")}</select></label>
-      <label class="f" for="ef-vendor">Paid to / vendor<input class="inp fill" id="ef-vendor"></label>
-      <label class="f" for="ef-desc" style="grid-column:span 2">Description<input class="inp fill" id="ef-desc"></label>
-      <label class="f" for="ef-from">Paid from<select class="inp fill" id="ef-from">${optList(L.accounts, "", "—")}</select></label>
-      <label class="f" for="ef-billno">Bill no.<input class="inp fill mono" id="ef-billno" data-v="ref"></label>
-      <label class="f" for="ef-amount">Amount ₹ (incl. GST)<input class="inp fill num" id="ef-amount" data-v="money" data-req="1" inputmode="decimal"></label>
-      <label class="f" for="ef-gst">GST %<select class="inp fill" id="ef-gst">${(L.gstRates || []).map(g => `<option value="${g}" ${num(g) === 0.18 ? "selected" : ""}>${Math.round(num(g) * 100)}%</option>`).join("")}</select></label>
-      <label class="f" for="ef-linked">Linked job / invoice<input class="inp fill mono" id="ef-linked" list="dl-invnos"></label>
-      <label class="f" for="ef-notes">Notes<input class="inp fill" id="ef-notes"></label>
-    </div>
-    <div class="row" style="margin-top:12px"><button class="btn primary" id="e-add">Add expense</button><span class="muted" id="ef-split"></span></div>
+  <div class="head"><div><div class="eyebrow">Money out</div><h1>Expenses &amp; purchase bills</h1><p>Every rupee spent, with GST split out for your input credit. Add the supplier's GSTIN and bill no. so GST filing can match the bill with GSTR-2B.</p></div><div class="row">${csvBtn("e-csv")}</div></div>
+  <div class="card" id="e-form"><h2>Add an expense / purchase bill</h2>
+    ${expenseFields({}, "ef-")}
+    <div class="row" style="margin-top:12px"><button class="btn primary" id="e-add">Add expense</button><span class="muted" style="font-size:13px">Tip: suppliers on <a href="#" data-go="clients">Clients</a> fill their GSTIN here automatically.</span></div>
   </div>
   <div id="e-stats"></div>
-  <div class="row"><input class="inp search" id="e-search" placeholder="Search vendor, description, bill no." value="${esc(S.ef["e-search"])}">
+  <div class="row"><input class="inp search" id="e-search" placeholder="Search supplier, GSTIN, description, bill no." value="${esc(S.ef["e-search"])}">
     <select class="inp" id="e-cat" style="width:auto">${optList(L.categories, S.ef["e-cat"], "All categories")}</select></div>
-  <div class="tbl-wrap"><table class="t"><thead><tr><th>Date</th><th>Vertical</th><th>Category</th><th>Paid to</th><th>Description</th><th>Paid from</th><th class="n">Amount ₹</th><th class="n">GST %</th><th class="n">GST ₹</th><th class="n">Basic ₹</th><th>Linked</th><th>Bill no.</th><th>Notes</th><th></th></tr></thead><tbody id="e-body"></tbody><tfoot id="e-foot"></tfoot></table></div>`;
+  <div class="tbl-wrap"><table class="t"><thead><tr><th>Date</th><th>Vertical</th><th>Category</th><th>Paid to</th><th>Supplier GSTIN</th><th>Bill no. · date</th><th>Description</th><th>Paid from</th><th class="n">Amount ₹</th><th class="n">GST %</th><th class="n">GST ₹</th><th class="n">Basic ₹</th><th>Linked</th><th>Notes</th><th></th></tr></thead><tbody id="e-body"></tbody><tfoot id="e-foot"></tfoot></table></div>`;
 };
 const splitGst = (amt, g) => ({gstAmt: rnd(amt - amt / (1 + g)), basic: rnd(amt / (1 + g))});
 AFTER.expenses = () => {
-  const showSplit = () => { const a = num($("#ef-amount").value), g = num($("#ef-gst").value); const s = splitGst(a, g); $("#ef-split").textContent = a ? `GST ₹${money(s.gstAmt)} · basic ₹${money(s.basic)}` : ""; };
-  $("#ef-amount").addEventListener("input", showSplit); $("#ef-gst").addEventListener("input", showSplit);
+  const form = $("#e-form"), read = wireExpenseForm(form, "ef-");
   $("#e-add").addEventListener("click", async () => {
-    const g = id => $("#ef-" + id).value.trim();
-    const errs = vCheck($("#e-form")); if (errs.length) return vFail(errs, $("#e-form"));
-    const amount = num(g("amount")), gst = num(g("gst"));
-    if (!amount) return toast("Enter the amount.", true);
-    if (g("date") > todayISO()) return toast("The expense date is in the future — check it.", true);
-    if (!g("category")) return toast("Pick a category.", true);
-    const s = splitGst(amount, gst);
-    const ok = await write(db => db.collection("expenses").add({date: g("date") || todayISO(), vertical: g("vertical"), category: g("category"), vendor: g("vendor"), desc: g("desc"), paidFrom: g("from"),
-      amount, gst, gstAmt: s.gstAmt, basic: s.basic, linked: g("linked"), billNo: g("billno"), notes: g("notes"), createdAt: new Date().toISOString()}), `Expense of ${money0(amount)} added.`);
-    if (ok) { for (const n of ["vendor", "desc", "amount", "linked", "billno", "notes"]) $("#ef-" + n).value = ""; showSplit(); }
+    const d = read(); if (!d) return;
+    const ok = await write(db => db.collection("expenses").add({...d, createdAt: new Date().toISOString()}), `Expense of ${money0(d.amount)} added.`);
+    if (ok) { for (const n of ["vendor", "gstin", "billno", "billdate", "desc", "amount", "linked", "notes"]) $("#ef-" + n).value = ""; $("#ef-amount").dispatchEvent(new Event("input")); }
   });
   const draw = () => {
-    const rows = S.expenses.filter(x => match(S.ef["e-search"], x.vendor, x.desc, x.billNo, x.notes) && (!S.ef["e-cat"] || x.category === S.ef["e-cat"]));
+    const rows = S.expenses.filter(x => match(S.ef["e-search"], x.vendor, x.gstin, x.desc, x.billNo, x.notes) && (!S.ef["e-cat"] || x.category === S.ef["e-cat"]));
     const tot = k => rows.reduce((s, x) => s + num(x[k]), 0);
     const month = todayISO().slice(0, 7);
     const mRows = S.expenses.filter(x => (x.date || "").startsWith(month));
+    const noG = mRows.filter(x => num(x.gstAmt) > 0 && !expGstin(x));
     $("#e-stats").innerHTML = `<div class="grid g3"><div class="stat"><span class="k">Spent this month</span><span class="v">${money0(mRows.reduce((s, x) => s + num(x.amount), 0))}</span></div>
-      <div class="stat"><span class="k">GST input credit this month</span><span class="v">${money0(mRows.reduce((s, x) => s + num(x.gstAmt), 0))}</span></div>
+      <div class="stat"><span class="k">GST input credit this month</span><span class="v">${money0(mRows.reduce((s, x) => s + num(x.gstAmt), 0))}</span>${noG.length ? `<span class="s bad-t">${noG.length} bill${noG.length > 1 ? "s" : ""} without supplier GSTIN</span>` : ""}</div>
       <div class="stat"><span class="k">Entries</span><span class="v">${S.expenses.length}</span></div></div>`;
-    $("#e-body").innerHTML = rows.length ? rows.map(x => `<tr><td>${fmtDate(x.date)}</td><td>${esc(x.vertical)}</td><td>${esc(x.category)}</td><td>${esc(x.vendor)}</td><td class="wrap">${esc(x.desc)}</td><td>${esc(x.paidFrom)}</td>
-      <td class="n"><b>${money(x.amount)}</b></td><td class="n">${Math.round(num(x.gst) * 100)}%</td><td class="n">${money(x.gstAmt)}</td><td class="n">${money(x.basic)}</td><td class="mono">${esc(x.linked)}</td><td class="mono">${esc(x.billNo)}</td><td class="wrap">${esc(x.notes)}</td>
-      <td><button class="btn sm ghost danger" data-del="expenses/${esc(x.id)}" data-what="this ${money0(x.amount)} expense">Delete</button></td></tr>`).join("")
-      : `<tr><td colspan="14" class="empty">${S.expenses.length ? "Nothing matches." : "No expenses yet."}</td></tr>`;
-    $("#e-foot").innerHTML = rows.length ? `<tr><td colspan="6">Total (${rows.length})</td><td class="n">${money(tot("amount"))}</td><td></td><td class="n">${money(tot("gstAmt"))}</td><td class="n">${money(tot("basic"))}</td><td colspan="4"></td></tr>` : "";
+    $("#e-body").innerHTML = rows.length ? rows.map(x => { const g = expGstin(x); return `<tr><td class="nw">${fmtDate(x.date)}</td><td>${esc(x.vertical)}</td><td>${esc(x.category)}</td><td>${esc(x.vendor)}</td>
+      <td class="mono">${g ? esc(g) + (x.gstin ? "" : ` <span class="muted" title="From Clients">·c</span>`) : num(x.gstAmt) > 0 ? `<span class="bad-t" title="No input credit without the supplier's GSTIN">none</span>` : ""}</td>
+      <td class="mono nw">${esc(x.billNo)}${x.billDate ? ` · ${esc(fmtDate(x.billDate))}` : ""}</td><td class="wrap">${esc(x.desc)}</td><td>${esc(x.paidFrom)}</td>
+      <td class="n"><b>${money(x.amount)}</b></td><td class="n">${Math.round(num(x.gst) * 100)}%</td><td class="n">${money(x.gstAmt)}</td><td class="n">${money(x.basic)}</td><td class="mono">${esc(x.linked)}</td><td class="wrap">${esc(x.notes)}</td>
+      <td><div class="row" style="flex-wrap:nowrap;gap:4px"><button class="btn sm" data-editexp="${esc(x.id)}">Edit</button><button class="btn sm ghost danger" data-del="expenses/${esc(x.id)}" data-what="this ${money0(x.amount)} expense">Delete</button></div></td></tr>`; }).join("")
+      : `<tr><td colspan="15" class="empty">${S.expenses.length ? "Nothing matches." : "No expenses yet."}</td></tr>`;
+    $("#e-foot").innerHTML = rows.length ? `<tr><td colspan="8">Total (${rows.length})</td><td class="n">${money(tot("amount"))}</td><td></td><td class="n">${money(tot("gstAmt"))}</td><td class="n">${money(tot("basic"))}</td><td colspan="3"></td></tr>` : "";
   };
   bindFilters(["e-search", "e-cat"], S.ef, draw); draw();
-  $("#e-csv")?.addEventListener("click", () => csvSave("Expenses.csv", ["Date", "Vertical", "Category", "Paid To / Vendor", "Description", "Paid From", "Amount (incl. GST)", "GST %", "GST Amount", "Basic Amount", "Linked Job / Invoice", "Bill No.", "Notes"],
-    S.expenses.map(x => [x.date, x.vertical, x.category, x.vendor, x.desc, x.paidFrom, x.amount, x.gst, x.gstAmt, x.basic, x.linked, x.billNo, x.notes])));
+  $("#e-csv")?.addEventListener("click", () => csvSave("Expenses.csv", ["Date", "Vertical", "Category", "Paid To / Supplier", "Supplier GSTIN", "Bill No.", "Bill Date", "Description", "Paid From", "Amount (incl. GST)", "GST %", "GST Amount", "Basic Amount", "Linked Job / Invoice", "Notes"],
+    S.expenses.map(x => [x.date, x.vertical, x.category, x.vendor, expGstin(x), x.billNo, x.billDate || "", x.desc, x.paidFrom, x.amount, x.gst, x.gstAmt, x.basic, x.linked, x.notes])));
 };
 
 /* =====================================================================
@@ -2296,7 +2361,7 @@ function waShare({title, phone, text, pdf}) {
     <p class="muted" id="wa-help" style="margin:0;font-size:12.5px">${pdf ? "" : "Opens WhatsApp with the message typed in — check it and press Send."}</p></div>`;
   document.body.appendChild(s);
   const q = id => s.querySelector("#" + id);
-  let file = null, canShare = false, closed = false;
+  let file = null, extra = [], canShare = false, closed = false;
   const close = () => { closed = true; s.remove(); document.removeEventListener("keydown", onKey); };
   const onKey = e => { if (e.key === "Escape") close(); };
   document.addEventListener("keydown", onKey);
@@ -2304,7 +2369,7 @@ function waShare({title, phone, text, pdf}) {
   q("wa-x").onclick = close;
   const msg = () => q("wa-text").value;
   const to = () => { const el = q("wa-to"), v = el.value.trim(); if (!v) return ""; const m = mobiles(v); if (!m || !m.length) { markField(el, V.mobile.t(v)); el.focus(); return null; } markField(el, ""); return "91" + m[0]; };
-  const download = () => file && S.dl.save({filename: file.name, data: file});
+  const download = () => { if (!file) return; S.dl.save({filename: file.name, data: file}); extra.forEach((f, i) => setTimeout(() => S.dl.save({filename: f.name, data: f}), 400 * (i + 1))); };
   q("wa-open").onclick = () => {
     const n = to(); if (n === null) return;
     if (file && !canShare) { download(); toast("PDF downloaded — attach it in the WhatsApp chat with 📎.", false, 7000); }
@@ -2314,14 +2379,16 @@ function waShare({title, phone, text, pdf}) {
   if (pdf) {
     q("wa-dl").onclick = download;
     q("wa-share").onclick = async () => {
-      try { await navigator.share({files: [file], text: msg(), title: file.name}); }
+      try { await navigator.share({files: [file, ...extra], text: msg(), title: file.name}); }
       catch (e) { if (e && e.name !== "AbortError") toast("Sharing didn't open (" + (e.message || e.name) + ") — use Open WhatsApp chat instead.", true); }
     };
-    pdf().then(({blob, name}) => {
+    pdf().then(({blob, name, more}) => {
       if (closed) return;
       file = new File([blob], name, {type: "application/pdf"});
-      try { canShare = !!(navigator.canShare && navigator.canShare({files: [file]})); } catch { canShare = false; }
-      q("wa-pdf").textContent = `PDF ready: ${name}`;
+      extra = (more || []).map(m => new File([m.blob], m.name, {type: m.type || "application/octet-stream"}));
+      try { canShare = !!(navigator.canShare && navigator.canShare({files: [file, ...extra]})); } catch { canShare = false; }
+      if (!canShare && extra.length) try { canShare = !!(navigator.canShare && navigator.canShare({files: [file]})); if (canShare) extra = []; } catch {}
+      q("wa-pdf").textContent = `Ready: ${[name, ...extra.map(f => f.name)].join(" + ")}`;
       q("wa-dl").disabled = false;
       q("wa-share").hidden = !canShare;
       q("wa-open").textContent = canShare ? "Message only" : "Open chat + download PDF";
@@ -2614,6 +2681,716 @@ async function scanResult(c, scan) {
 
 </script>
 
+<script>
+"use strict";
+/* =====================================================================
+   GST FILING (v13) — everything the CA needs to file GSTR-1 and GSTR-3B
+   for one month, built from the saved Tax Invoices and Expenses.
+   - gstMonth(ym)      → all the numbers + problems for "YYYY-MM"
+   - VIEWS.gst / AFTER.gst → the screen
+   - gstWorkbook(ym)   → Excel (GST offline-tool columns + register + 3B)
+   - gstPdfHTML(ym)    → A4 summary pages (PDF / WhatsApp to the CA)
+   Filed status lives in Settings → defaults.gstFiled[ym] = {r1: {on, arn}, r3b: {on, arn}}
+   and the CA's WhatsApp number in defaults.caPhone (both sync with the Sheet).
+   ===================================================================== */
+const B2CL_LIMIT = 100000;   // inter-state B2C invoices above ₹1 lakh are reported one by one (from Aug 2024)
+const MONTHS_FULL = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const ymOf = iso => String(iso || "").slice(0, 7);
+const ymAdd = (ym, n) => { const [y, m] = ym.split("-").map(Number); return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7); };
+const ymLabel = ym => { const [y, m] = String(ym).split("-").map(Number); return m ? `${MONTHS_FULL[m - 1]} ${y}` : ""; };
+const gstDue = ym => ({r1: ymAdd(ym, 1) + "-11", r3b: ymAdd(ym, 1) + "-20"});   // monthly filer
+const gstFiled = ym => ((set().defaults.gstFiled || {})[ym]) || {};
+const posLabel = c => c ? `${c}-${stateName(c)}` : "";
+const UQC = {PCS: "PCS-PIECES", PC: "PCS-PIECES", PIECE: "PCS-PIECES", PIECES: "PCS-PIECES", NOS: "NOS-NUMBERS", NO: "NOS-NUMBERS", SET: "SET-SETS", SETS: "SET-SETS",
+  SQFT: "SQF-SQUARE FEET", SQF: "SQF-SQUARE FEET", SQM: "SQM-SQUARE METERS", SQMTR: "SQM-SQUARE METERS", MTR: "MTR-METERS", M: "MTR-METERS", METER: "MTR-METERS",
+  KG: "KGS-KILOGRAMS", KGS: "KGS-KILOGRAMS", GM: "GMS-GRAMMES", GMS: "GMS-GRAMMES", BOX: "BOX-BOX", PKT: "PAC-PACKS", PACK: "PAC-PACKS", PAC: "PAC-PACKS",
+  ROLL: "ROL-ROLLS", ROL: "ROL-ROLLS", DOZ: "DOZ-DOZENS", BDL: "BDL-BUNDLES", UNIT: "UNT-UNITS", UNT: "UNT-UNITS", LTR: "LTR-LITRES", BTL: "BTL-BOTTLES", PRS: "PRS-PAIRS", PAIR: "PRS-PAIRS"};
+const uqcOf = u => UQC[String(u || "").toUpperCase().replace(/[^A-Z]/g, "")] || "OTH-OTHERS";
+const r2 = v => rnd(v, 2);
+
+function gstMonth(ym) {
+  const co = set().company, home = ownStateCode(), own = String(co.gstin || "").toUpperCase();
+  const byNo = (a, b) => (a.date + a.no).localeCompare(b.date + b.no, undefined, {numeric: true});
+  const inMonth = appDocs().filter(d => d.kind === "invoice" && ymOf(d.date) === ym);
+  const inv = inMonth.filter(d => d.type === "INVOICE").sort(byNo);
+  const bills = inMonth.filter(d => d.type === "BILL").sort(byNo);
+  const errs = [], warns = [];
+  const E = (d, m) => errs.push({id: d ? d.id : "", no: d ? d.no : "", m});
+  const W = (d, m) => warns.push({id: d ? d.id : "", no: d ? d.no : "", m});
+  const b2b = [], b2cl = [], reg = [];
+  const b2cs = new Map(), unregInter = new Map(), hsn = {b2b: new Map(), b2c: new Map()};
+  const nil = {interReg: 0, intraReg: 0, interUnreg: 0, intraUnreg: 0};
+  const out = {taxable: 0, igst: 0, cgst: 0, sgst: 0, nil: 0, value: 0};
+  if (!own) E(null, "Your own GSTIN is blank on Settings — it's needed on every return.");
+
+  for (const d of inv) {
+    const g = String(d.gstin || "").trim().toUpperCase(), regd = !!g;
+    const gBad = regd ? gstinProblem(g) : "";
+    if (gBad) E(d, `Client GSTIN ${g}: ${gBad}`);
+    else if (regd && g === own) E(d, "The client GSTIN is your own GSTIN.");
+    let pc = stateCode(d.pos);
+    if (!pc) { pc = regd && !gBad ? g.slice(0, 2) : home; W(d, `No place of supply on the invoice — counted as ${stateName(pc)}.`); }
+    const inter = pc !== home, chargedInter = d.supply === INTER;
+    if (inter !== chargedInter) E(d, `Place of supply is ${stateName(pc)}, so the tax should be ${inter ? "IGST" : "CGST + SGST"} — this invoice charged ${chargedInter ? "IGST" : "CGST + SGST"}.`);
+    if (regd && !gBad && g.slice(0, 2) !== pc) W(d, `Client's GSTIN is from ${stateName(g.slice(0, 2))} but the place of supply is ${stateName(pc)} — right only if the goods were delivered there.`);
+    const sec = regd ? "B2B" : inter && num(d.total) > B2CL_LIMIT ? "B2CL" : "B2CS";
+    const rates = new Map();
+    (d.lines || []).forEach((l, i) => {
+      const amt = num(l.amount), rate = r2(num(l.gst) * 100);
+      const h = String(l.hsn || "").replace(/\s/g, "");
+      if (!h) E(d, `Line ${i + 1} (${l.desc}) has no HSN/SAC code — the HSN table needs one for every line.`);
+      else if (!/^\d{4}(\d{2}){0,2}$/.test(h)) E(d, `Line ${i + 1}: HSN/SAC “${h}” should be 4, 6 or 8 digits.`);
+      const rg = rates.get(rate) || {rate, taxable: 0}; rg.taxable += amt; rates.set(rate, rg);
+      const svc = h.startsWith("99"), uqc = svc ? "NA" : uqcOf(l.unit), M = regd ? hsn.b2b : hsn.b2c, k = `${h}|${uqc}|${rate}`;
+      const x = M.get(k) || {hsn: h, desc: l.desc, uqc, qty: 0, rate, taxable: 0, igst: 0, cgst: 0, sgst: 0};
+      const tax = amt * rate / 100;
+      x.qty += svc ? 0 : num(l.qty); x.taxable += amt;
+      if (inter) x.igst += tax; else { x.cgst += tax / 2; x.sgst += tax / 2; }
+      M.set(k, x);
+    });
+    let ti = 0, tc = 0, ts = 0, tx = 0;
+    for (const rg of [...rates.values()].sort((a, b) => a.rate - b.rate)) {
+      rg.taxable = r2(rg.taxable);
+      const tax = r2(rg.taxable * rg.rate / 100), igst = inter ? tax : 0, cgst = inter ? 0 : r2(tax / 2), sgst = cgst;
+      ti += igst; tc += cgst; ts += sgst; tx += rg.taxable;
+      if (!rg.rate) { nil[(inter ? "inter" : "intra") + (regd ? "Reg" : "Unreg")] += rg.taxable; out.nil += rg.taxable; continue; }
+      out.taxable += rg.taxable; out.igst += igst; out.cgst += cgst; out.sgst += sgst;
+      if (sec === "B2B") b2b.push({id: d.id, gstin: g, name: d.client, no: d.no, date: d.date, value: num(d.total), pos: pc, rate: rg.rate, taxable: rg.taxable, igst, cgst, sgst});
+      else if (sec === "B2CL") b2cl.push({id: d.id, no: d.no, date: d.date, name: d.client, value: num(d.total), pos: pc, rate: rg.rate, taxable: rg.taxable, igst});
+      else { const k = pc + "|" + rg.rate, y = b2cs.get(k) || {pos: pc, rate: rg.rate, taxable: 0, igst: 0, cgst: 0, sgst: 0, n: new Set()}; y.taxable += rg.taxable; y.igst += igst; y.cgst += cgst; y.sgst += sgst; y.n.add(d.no); b2cs.set(k, y); }
+      if (!regd && inter) { const u = unregInter.get(pc) || {pos: pc, taxable: 0, igst: 0}; u.taxable += rg.taxable; u.igst += igst; unregInter.set(pc, u); }
+    }
+    if (Math.abs(ti + tc + ts - num(d.gstAmt)) >= 1) W(d, `GST on the invoice (₹${money(d.gstAmt)}) differs from rate × taxable value (₹${money(ti + tc + ts)}) by ₹1 or more — open it and Save again.`);
+    out.value += num(d.total);
+    reg.push({id: d.id, no: d.no, date: d.date, client: d.client, gstin: g, pos: pc, sec, taxable: r2(tx), igst: r2(ti), cgst: r2(tc), sgst: r2(ts), total: num(d.total)});
+  }
+  for (const M of [hsn.b2b, hsn.b2c]) for (const x of M.values()) { x.taxable = r2(x.taxable); x.qty = rnd(x.qty, 3); x.igst = r2(x.igst); x.cgst = r2(x.cgst); x.sgst = r2(x.sgst); x.value = r2(x.taxable + x.igst + x.cgst + x.sgst); }
+  for (const y of b2cs.values()) { y.taxable = r2(y.taxable); y.igst = r2(y.igst); y.cgst = r2(y.cgst); y.sgst = r2(y.sgst); y.count = y.n.size; }
+  for (const k of Object.keys(out)) out[k] = r2(out[k]);
+  for (const k of Object.keys(nil)) nil[k] = r2(nil[k]);
+
+  /* Table 13 — invoice number ranges, gaps counted as cancelled */
+  const docs = [], groups = new Map();
+  for (const d of inv) {
+    const m = /^(.*?)(\d+)$/.exec(String(d.no || "").trim());
+    if (!m) { docs.push({from: d.no, to: d.no, total: 1, cancelled: 0}); continue; }
+    const gk = m[1].toUpperCase(), gr = groups.get(gk) || {prefix: m[1], items: []};
+    gr.items.push({n: Number(m[2]), no: d.no, w: m[2].length}); groups.set(gk, gr);
+  }
+  const cancelled = [], elsewhere = [];
+  for (const gr of groups.values()) {
+    gr.items.sort((a, b) => a.n - b.n);
+    const lo = gr.items[0], hi = gr.items[gr.items.length - 1], have = new Set(gr.items.map(x => x.n));
+    let c = 0;
+    for (let n = lo.n + 1; n < hi.n && n - lo.n < 5000; n++) {
+      if (have.has(n)) continue;
+      const no = gr.prefix + String(n).padStart(lo.w, "0"), other = usedNo(no);
+      if (other) elsewhere.push(`${no} (${fmtDate(other.date)})`); else { cancelled.push(no); c++; }
+    }
+    docs.push({from: lo.no, to: hi.no, total: hi.n - lo.n + 1, cancelled: c});
+  }
+  if (cancelled.length) W(null, `Missing invoice number${cancelled.length > 1 ? "s" : ""} ${cancelled.slice(0, 8).join(", ")}${cancelled.length > 8 ? ` +${cancelled.length - 8} more` : ""} — counted as cancelled in the document summary (Table 13). Right if they were deleted or never issued.`);
+  if (elsewhere.length) W(null, `${elsewhere.join(", ")} sit${elsewhere.length > 1 ? "" : "s"} inside this month's number range but ${elsewhere.length > 1 ? "are" : "is"} dated in another month — tell your CA so the Table 13 range can be split.`);
+
+  /* Input tax credit: from GSTR-2B when its file is loaded for this month (v14), else estimated from Expenses */
+  const itc = S.expenses.filter(x => ymOf(x.billDate || x.date) === ym && num(x.gstAmt) > 0).sort((a, b) => (a.billDate || a.date || "").localeCompare(b.billDate || b.date || "")).map(x => {
+    const sp = expSplit(x);
+    return {id: x.id, date: x.billDate || x.date, vendor: x.vendor, desc: x.desc, billNo: x.billNo, gstin: sp.gstin, basic: num(x.basic), rate: r2(num(x.gst) * 100), gst: num(x.gstAmt),
+            igst: sp.igst, cgst: sp.cgst, sgst: sp.sgst, amount: num(x.amount)};
+  });
+  const withG = itc.filter(x => x.gstin), noG = itc.filter(x => !x.gstin);
+  const g2b = g2bRecon(ym);
+  const credit = g2b ? {...g2b.claim} : {igst: r2(withG.reduce((s, x) => s + x.igst, 0)), cgst: r2(withG.reduce((s, x) => s + x.cgst, 0)), sgst: r2(withG.reduce((s, x) => s + x.sgst, 0))};
+  if (noG.length) W(null, `${noG.length} expense${noG.length > 1 ? "s" : ""} with ₹${money(noG.reduce((s, x) => s + x.gst, 0))} GST ${noG.length > 1 ? "have" : "has"} no supplier GSTIN, so no input credit is counted for ${noG.length > 1 ? "them" : "it"}. Add the GSTIN on the expense (Edit) if the bill shows one.`);
+  if (!g2b && withG.length) W(null, "Input credit below is an estimate from your expenses. Load this month's GSTR-2B file (Compare with GSTR-2B) to check it bill by bill.");
+  if (g2b) {
+    const T = a => money(a.reduce((s, r) => s + r.tax, 0));
+    if (g2b.only2b.length) W(null, `${g2b.only2b.length} bill${g2b.only2b.length > 1 ? "s" : ""} in GSTR-2B (GST ₹${T(g2b.only2b)}) ${g2b.only2b.length > 1 ? "aren't" : "isn't"} in your expenses — add ${g2b.only2b.length > 1 ? "them" : "it"} to claim the credit, or mark Not mine and reject in IMS.`);
+    if (g2b.probable.length) W(null, `${g2b.probable.length} bill${g2b.probable.length > 1 ? "s look" : " looks"} like ${g2b.probable.length > 1 ? "ones" : "one"} in GSTR-2B but the bill no. or GSTIN differs — confirm with “Same bill” to count the credit.`);
+    if (g2b.missing.length) W(null, `${g2b.missing.length} of your bills (GST ₹${money(g2b.missing.reduce((s, x) => s + num(x.gstAmt), 0))}) ${g2b.missing.length > 1 ? "aren't" : "isn't"} in GSTR-2B yet — remind the supplier to file their GSTR-1. The credit waits until it shows.`);
+    if (g2b.blocked.length) W(null, `${g2b.blocked.length} GSTR-2B bill${g2b.blocked.length > 1 ? "s are" : " is"} marked “ITC not available” or reverse charge — not counted; your CA decides.`);
+    if (g2b.cdn) W(null, `GSTR-2B also has ${g2b.cdn} credit/debit note${g2b.cdn > 1 ? "s" : ""} from suppliers — not matched here; your CA adjusts the credit for ${g2b.cdn > 1 ? "them" : "it"}.`);
+  }
+  if (bills.length) W(null, `${bills.length} non-GST Bill${bills.length > 1 ? "s" : ""} worth ₹${money(bills.reduce((s, b) => s + num(b.total), 0))} ${bills.length > 1 ? "are" : "is"} dated this month. They're not in these GST tables — ask your CA how they should be shown.`);
+  if (!inv.length) W(null, `No tax invoices dated in ${ymLabel(ym)}. A nil GSTR-1 and GSTR-3B still has to be filed.`);
+
+  /* GSTR-3B set-off (IGST credit first, then CGST/SGST; CGST and SGST never cross) */
+  const liab = {igst: out.igst, cgst: out.cgst, sgst: out.sgst}, left = {...credit}, cash = {...liab};
+  const take = (f, t) => { const u = Math.min(left[f], cash[t]); left[f] = r2(left[f] - u); cash[t] = r2(cash[t] - u); };
+  take("igst", "igst"); take("igst", "cgst"); take("igst", "sgst"); take("cgst", "cgst"); take("cgst", "igst"); take("sgst", "sgst"); take("sgst", "igst");
+
+  return {ym, inv, bills, errs, warns, b2b, b2cl, b2cs: [...b2cs.values()].sort((a, b) => a.pos.localeCompare(b.pos) || a.rate - b.rate),
+    hsnB2B: [...hsn.b2b.values()].sort((a, b) => a.hsn.localeCompare(b.hsn) || a.rate - b.rate), hsnB2C: [...hsn.b2c.values()].sort((a, b) => a.hsn.localeCompare(b.hsn) || a.rate - b.rate),
+    nil, docs, reg, out, itc, credit, g2b, cash, carry: left, unregInter: [...unregInter.values()].map(u => ({...u, taxable: r2(u.taxable), igst: r2(u.igst)})).sort((a, b) => a.pos.localeCompare(b.pos))};
+}
+
+/* Months to offer: from the first saved invoice/expense (or FY start) up to this month */
+function gstMonths() {
+  let first = ymOf(set().defaults.fyStart) || ymOf(todayISO());
+  for (const d of appDocs()) if (d.kind === "invoice" && d.date && ymOf(d.date) < first) first = ymOf(d.date);
+  for (const x of S.expenses) if (x.date && ymOf(x.date) < first) first = ymOf(x.date);
+  const out = [], cur = ymOf(todayISO());
+  for (let ym = cur; ym >= first && out.length < 60; ym = ymAdd(ym, -1)) out.push(ym);
+  return out;
+}
+const sumBy = (a, k) => r2(a.reduce((s, x) => s + num(x[k]), 0));
+function dueText(on, filed) {
+  if (filed) return `Filed ${fmtDate(filed.on)}${filed.arn ? ` · ARN ${filed.arn}` : ""}`;
+  const n = daysBetween(todayISO(), on);
+  return n > 0 ? `due ${fmtDate(on)} · ${n} day${n > 1 ? "s" : ""} left` : n === 0 ? `due today (${fmtDate(on)})` : `was due ${fmtDate(on)} · ${-n} day${n < -1 ? "s" : ""} late`;
+}
+/* Shown on Home: the return that needs doing next */
+function gstHomeTodo() {
+  const ym = ymAdd(ymOf(todayISO()), -1), f = gstFiled(ym), d = gstDue(ym);
+  const done = !!(f.r1 && f.r3b);
+  const left = [!f.r1 ? `GSTR-1 ${dueText(d.r1)}` : "", !f.r3b ? `GSTR-3B ${dueText(d.r3b)}` : ""].filter(Boolean).join(", ");
+  return [done, done ? `GST for ${ymLabel(ym)} is filed. <a href="#" data-go="gst">GST filing</a>` : `GST for ${ymLabel(ym)}: ${esc(left)}. <a href="#" data-go="gst">Prepare it on GST filing</a> and send it to your CA.`];
+}
+
+S.gstYm = null;
+VIEWS.gst = () => {
+  const months = gstMonths();
+  if (!S.gstYm || !months.includes(S.gstYm)) S.gstYm = months.includes(ymAdd(ymOf(todayISO()), -1)) ? ymAdd(ymOf(todayISO()), -1) : months[0];
+  const ym = S.gstYm;
+  if (S.g2b[ym] === undefined && L.email) g2bLoad(ym).then(d => { if (d && S.view === "gst" && S.gstYm === ym) render(); });
+  const G = gstMonth(ym), due = gstDue(ym), f = gstFiled(ym), co = set().company, o = G.out;
+  const outTax = r2(o.igst + o.cgst + o.sgst), cashT = r2(G.cash.igst + G.cash.cgst + G.cash.sgst), credT = r2(G.credit.igst + G.credit.cgst + G.credit.sgst);
+  const late = on => !on ? false : todayISO() > on;
+  const openBtn = id => id ? `<button class="btn sm" data-open="${esc(id)}">Open</button>` : "";
+  const prob = (x, cls) => `<li class="${cls}"><span>${x.no ? `<b class="mono">${esc(x.no)}</b> — ` : ""}${esc(x.m)}</span>${openBtn(x.id)}</li>`;
+  const tbl = (head, rows, foot) => `<div class="tbl-wrap"><table class="t"><thead><tr>${head.map(h => `<th${/₹|Qty|Rate|No\.|Count|Total|Cancel/.test(h) ? ' class="n"' : ""}>${h}</th>`).join("")}</tr></thead><tbody>${rows.length ? rows.join("") : `<tr><td colspan="${head.length}" class="empty">None this month.</td></tr>`}</tbody>${foot ? `<tfoot>${foot}</tfoot>` : ""}</table></div>`;
+  const sec = (title, sub, body, open) => `<details class="gx" ${open ? "open" : ""}><summary><b>${title}</b><span class="muted">${sub}</span></summary>${body}</details>`;
+  const n = v => `<td class="n">${money(v)}</td>`;
+  const b2bInv = new Set(G.b2b.map(x => x.no)).size;
+  const filedBox = (k, label, on) => f[k]
+    ? `<div class="gfiled ok"><span><b>${label}</b> filed on ${fmtDate(f[k].on)}${f[k].arn ? ` · ARN <span class="mono">${esc(f[k].arn)}</span>` : ""}</span><button class="btn sm ghost" data-gst-unfile="${k}">Undo</button></div>`
+    : `<div class="gfiled ${late(on) ? "late" : ""}"><span><b>${label}</b> ${esc(dueText(on))}</span><button class="btn sm primary" data-gst-file="${k}">Mark filed…</button></div>`;
+  return `
+  <div class="head"><div><div class="eyebrow">Monthly GST · GSTIN ${esc(co.gstin || "not set")}</div><h1>GST filing — ${esc(ymLabel(ym))}</h1>
+    <p>Built from the Tax Invoices and Expenses dated in this month. Download the pack or send it to your CA on WhatsApp — they file GSTR-1 (sales) and GSTR-3B (tax payment) from it.</p></div>
+    <label class="f" for="gst-ym" style="min-width:190px">Return month<select class="inp" id="gst-ym">${months.map(m => `<option value="${m}" ${m === ym ? "selected" : ""}>${esc(ymLabel(m))}${gstFiled(m).r1 && gstFiled(m).r3b ? " ✓" : ""}</option>`).join("")}</select></label></div>
+  <div class="row" style="gap:8px;flex-wrap:wrap">
+    <button class="btn primary" id="gst-xlsx">Download Excel for CA</button>
+    <button class="btn" id="gst-pdf">Download PDF summary</button>
+    <button class="btn wa" id="gst-wa">📲 Send to CA</button>
+    <span class="muted" style="font-size:13px">Last synced ${esc(ago(L.lastSync))} — sync first if invoices were made on another device.</span>
+  </div>
+  <div class="grid g4">
+    <div class="stat ${!f.r1 && late(due.r1) ? "alert" : ""}"><span class="k">GSTR-1 · sales</span><span class="v">${f.r1 ? "Filed ✓" : fmtDate(due.r1)}</span><span class="s">${esc(dueText(due.r1, f.r1))}</span></div>
+    <div class="stat ${!f.r3b && late(due.r3b) ? "alert" : ""}"><span class="k">GSTR-3B · tax payment</span><span class="v">${f.r3b ? "Filed ✓" : fmtDate(due.r3b)}</span><span class="s">${esc(dueText(due.r3b, f.r3b))}</span></div>
+    <div class="stat"><span class="k">GST on sales</span><span class="v">${money0(outTax)}</span><span class="s">${G.inv.length} tax invoice${G.inv.length === 1 ? "" : "s"} · taxable ${money0(o.taxable)}</span></div>
+    <div class="stat"><span class="k">Estimated GST to pay</span><span class="v">${money0(cashT)}</span><span class="s">after ${money0(credT)} input credit</span></div>
+  </div>
+  ${G.errs.length || G.warns.length ? `<div class="card"><h2 style="margin:0 0 8px">${G.errs.length ? `Fix ${G.errs.length} problem${G.errs.length > 1 ? "s" : ""} before filing` : "Worth checking"}</h2>
+    <ul class="gprob">${G.errs.map(x => prob(x, "e")).join("")}${G.warns.map(x => prob(x, "w")).join("")}</ul></div>`
+    : `<div class="card"><p style="margin:0" class="good-t"><b>✓ No problems found</b> — every invoice has a valid GSTIN or is B2C, an HSN code, and the right tax for its place of supply.</p></div>`}
+  <div class="card"><h2 style="margin:0 0 4px">GSTR-1 — sales, table by table</h2><p class="muted" style="margin:0 0 10px;font-size:13px">The same split the GST portal asks for. The Excel file has these tables in the GST offline tool's column layout.</p>
+    ${sec("B2B — registered clients (4A)", `${b2bInv} invoice${b2bInv === 1 ? "" : "s"} · taxable ₹${money(sumBy(G.b2b, "taxable"))}`,
+      tbl(["Client GSTIN", "Client", "Invoice No.", "Date", "Invoice value ₹", "Place of supply", "Rate %", "Taxable ₹", "IGST ₹", "CGST ₹", "SGST ₹", ""],
+        G.b2b.map(x => `<tr><td class="mono">${esc(x.gstin)}</td><td>${esc(x.name)}</td><td class="mono">${esc(x.no)}</td><td class="nw">${fmtDate(x.date)}</td>${n(x.value)}<td>${esc(posLabel(x.pos))}</td><td class="n">${x.rate}</td>${n(x.taxable)}${n(x.igst)}${n(x.cgst)}${n(x.sgst)}<td>${openBtn(x.id)}</td></tr>`),
+        G.b2b.length ? `<tr><td colspan="7">Total</td>${n(sumBy(G.b2b, "taxable"))}${n(sumBy(G.b2b, "igst"))}${n(sumBy(G.b2b, "cgst"))}${n(sumBy(G.b2b, "sgst"))}<td></td></tr>` : ""), true)}
+    ${sec("B2C large — other-state, no GSTIN, over ₹1 lakh (5)", `${G.b2cl.length} row${G.b2cl.length === 1 ? "" : "s"} · taxable ₹${money(sumBy(G.b2cl, "taxable"))}`,
+      tbl(["Invoice No.", "Date", "Client", "Invoice value ₹", "Place of supply", "Rate %", "Taxable ₹", "IGST ₹", ""],
+        G.b2cl.map(x => `<tr><td class="mono">${esc(x.no)}</td><td class="nw">${fmtDate(x.date)}</td><td>${esc(x.name)}</td>${n(x.value)}<td>${esc(posLabel(x.pos))}</td><td class="n">${x.rate}</td>${n(x.taxable)}${n(x.igst)}<td>${openBtn(x.id)}</td></tr>`)))}
+    ${sec("B2C small — no GSTIN, by state and rate (7)", `${G.b2cs.length} row${G.b2cs.length === 1 ? "" : "s"} · taxable ₹${money(sumBy(G.b2cs, "taxable"))}`,
+      tbl(["Place of supply", "Rate %", "Invoices (count)", "Taxable ₹", "IGST ₹", "CGST ₹", "SGST ₹"],
+        G.b2cs.map(x => `<tr><td>${esc(posLabel(x.pos))}</td><td class="n">${x.rate}</td><td class="n">${x.count}</td>${n(x.taxable)}${n(x.igst)}${n(x.cgst)}${n(x.sgst)}</tr>`)))}
+    ${G.out.nil ? sec("Nil-rated (0%) lines (8)", `taxable ₹${money(G.out.nil)}`,
+      tbl(["Supply", "Nil-rated ₹"], [["Inter-State to registered", G.nil.interReg], ["Intra-State to registered", G.nil.intraReg], ["Inter-State to unregistered", G.nil.interUnreg], ["Intra-State to unregistered", G.nil.intraUnreg]].map(([k, v]) => `<tr><td>${k}</td>${n(v)}</tr>`))) : ""}
+    ${[["HSN summary — B2B (12)", G.hsnB2B], ["HSN summary — B2C (12)", G.hsnB2C]].map(([t, H]) => sec(t, `${H.length} row${H.length === 1 ? "" : "s"} · taxable ₹${money(sumBy(H, "taxable"))}`,
+      tbl(["HSN/SAC", "Description", "UQC", "Total Qty", "Rate %", "Taxable ₹", "IGST ₹", "CGST ₹", "SGST ₹", "Total value ₹"],
+        H.map(x => `<tr><td class="mono">${esc(x.hsn || "—")}</td><td>${esc(x.desc)}</td><td>${esc(x.uqc)}</td><td class="n">${x.qty || ""}</td><td class="n">${x.rate}</td>${n(x.taxable)}${n(x.igst)}${n(x.cgst)}${n(x.sgst)}${n(x.value)}</tr>`)))).join("")}
+    ${sec("Documents issued (13)", G.docs.map(x => `${x.from} – ${x.to}`).join(", ") || "none",
+      tbl(["Nature of document", "From", "To", "Total No.", "Cancelled"], G.docs.map(x => `<tr><td>Invoices for outward supply</td><td class="mono">${esc(x.from)}</td><td class="mono">${esc(x.to)}</td><td class="n">${x.total}</td><td class="n">${x.cancelled}</td></tr>`)))}
+  </div>
+  <div class="card"><h2 style="margin:0 0 4px">GSTR-3B — tax to pay (estimate)</h2><p class="muted" style="margin:0 0 10px;font-size:13px">Sales figures come from GSTR-1 above. ${G.g2b ? "Input credit is the matched GSTR-2B bills below." : "Input credit is estimated from Expenses until you load GSTR-2B below."}</p>
+    ${tbl(["", "Taxable ₹", "IGST ₹", "CGST ₹", "SGST ₹"], [
+      `<tr><td>3.1(a) Outward taxable supplies</td>${n(o.taxable)}${n(o.igst)}${n(o.cgst)}${n(o.sgst)}</tr>`,
+      `<tr><td>3.1(c) Nil-rated supplies</td>${n(o.nil)}<td></td><td></td><td></td></tr>`,
+      ...G.unregInter.map(u => `<tr><td class="muted">3.2 of which to unregistered, ${esc(posLabel(u.pos))}</td>${n(u.taxable)}${n(u.igst)}<td></td><td></td></tr>`),
+      `<tr><td>4(A)(5) Input credit ${G.g2b ? `from GSTR-2B — ${G.g2b.matched.length} matched bill${G.g2b.matched.length === 1 ? "" : "s"}` : `estimated from ${G.itc.filter(x => x.gstin).length} expense bill${G.itc.filter(x => x.gstin).length === 1 ? "" : "s"}`}</td><td></td>${n(G.credit.igst)}${n(G.credit.cgst)}${n(G.credit.sgst)}</tr>`,
+      `<tr class="gpay"><td><b>To pay in cash</b> (after using the credit)</td><td></td>${n(G.cash.igst)}${n(G.cash.cgst)}${n(G.cash.sgst)}</tr>`,
+      `<tr><td class="muted">Credit left over for next month</td><td></td>${n(G.carry.igst)}${n(G.carry.cgst)}${n(G.carry.sgst)}</tr>`])}
+    ${G.itc.length ? sec(G.g2b ? "Your expense bills with GST this month" : "Expense bills used for the estimate", `${G.itc.length} bill${G.itc.length === 1 ? "" : "s"} · GST ₹${money(credT)}`,
+      tbl(["Date", "Supplier", "Supplier GSTIN", "Bill no.", "Basic ₹", "Rate %", "IGST ₹", "CGST ₹", "SGST ₹"],
+        G.itc.map(x => `<tr><td class="nw">${fmtDate(x.date)}</td><td>${esc(x.vendor)}</td><td class="mono">${x.gstin ? esc(x.gstin) : `<span class="bad-t">none</span>`}</td><td class="mono">${esc(x.billNo)}</td>${n(x.basic)}<td class="n">${x.rate}</td>${n(x.igst)}${n(x.cgst)}${n(x.sgst)}</tr>`))) : ""}
+  </div>
+  ${g2bCard(ym, G)}
+  <div class="grid g2">
+    <div class="card"><h2 style="margin:0 0 8px">Filed?</h2>
+      ${filedBox("r1", "GSTR-1", due.r1)}${filedBox("r3b", "GSTR-3B", due.r3b)}
+      <p class="muted" style="margin:8px 0 0;font-size:13px">Once GSTR-1 is marked filed, changing or deleting a tax invoice dated in ${esc(ymLabel(ym))} asks first — after filing, a change has to go through your CA as an amendment or credit note.</p></div>
+    <div class="card"><h2 style="margin:0 0 8px">Your CA</h2>
+      <label class="f" for="gst-ca">CA's WhatsApp number<input class="inp fill" id="gst-ca" data-v="mobile" inputmode="tel" placeholder="10-digit mobile" value="${esc(set().defaults.caPhone || "")}"></label>
+      <p class="muted" style="margin:8px 0 0;font-size:13px">📲 Send to CA sends the PDF summary and the Excel file with a short message. Monthly filer dates: GSTR-1 by the 11th, GSTR-3B by the 20th of the next month.</p></div>
+  </div>`;
+};
+
+AFTER.gst = () => {
+  $("#gst-ym").addEventListener("change", e => { S.gstYm = e.target.value; render(); });
+  $("#gst-xlsx").addEventListener("click", () => gstDownloadExcel(S.gstYm));
+  $("#gst-pdf").addEventListener("click", () => gstDownloadPdf(S.gstYm));
+  $("#gst-wa").addEventListener("click", () => gstShare(S.gstYm));
+  const ca = $("#gst-ca");
+  ca.addEventListener("change", () => {
+    const v = ca.value.trim(), m = v ? mobiles(v) : [];
+    if (v && (!m || !m.length)) return markField(ca, V.mobile.t(v));
+    markField(ca, "");
+    write(db => db.doc("config/settings").update({defaults: {caPhone: m.join(", ")}}), "CA's number saved.");
+  });
+  $$("[data-gst-file]").forEach(b => b.addEventListener("click", () => gstMarkFiled(S.gstYm, b.dataset.gstFile)));
+  g2bWire(S.gstYm);
+  $$("[data-gst-unfile]").forEach(b => b.addEventListener("click", async () => {
+    const k = b.dataset.gstUnfile, label = k === "r1" ? "GSTR-1" : "GSTR-3B";
+    if (!(await confirmBox(`Undo ${label} filed?`, `${label} for ${esc(ymLabel(S.gstYm))} will show as not filed again.`, "Undo"))) return;
+    write(db => db.doc("config/settings").update({defaults: {gstFiled: {[S.gstYm]: {[k]: null}}}}), `${label} marked not filed.`);
+  }));
+};
+
+async function gstMarkFiled(ym, k) {
+  const label = k === "r1" ? "GSTR-1" : "GSTR-3B";
+  const r = await modal({title: `${label} for ${ymLabel(ym)} filed`,
+    body: `<div class="grid g2"><label class="f" for="gf-on">Filed on<input class="inp fill" type="date" id="gf-on" data-req="1" value="${todayISO()}"></label>
+      <label class="f" for="gf-arn">ARN (optional)<input class="inp fill mono" id="gf-arn" maxlength="20" placeholder="From the CA or the portal" autocomplete="off"></label></div>
+      <p class="muted" style="margin:10px 0 0;font-size:13px">${k === "r1" ? `After this, changing or deleting a tax invoice dated in ${esc(ymLabel(ym))} asks first.` : "Mark it once the tax is paid and the return is filed."}</p>`,
+    actions: [{label: "Cancel", value: false, cls: "ghost"}, {label: "Mark filed", value: true, cls: "primary", collect: s => {
+      const errs = vCheck(s); if (errs.length) return vFail(errs, s);
+      const on = $("#gf-on", s).value;
+      if (on > todayISO()) { toast("The filing date can't be in the future.", true); return false; }
+      return {on, arn: $("#gf-arn", s).value.trim().toUpperCase().replace(/\s/g, "")};
+    }}]});
+  if (!r?.value) return;
+  write(db => db.doc("config/settings").update({defaults: {gstFiled: {[ym]: {[k]: r.data}}}}), `${label} for ${ymLabel(ym)} marked filed.`);
+}
+
+/* Before changing/deleting a tax invoice in a month whose GSTR-1 is filed */
+async function gstFiledGuard(doc, action) {
+  if (!doc || doc.type !== "INVOICE" || doc.source !== "app") return true;
+  const ym = ymOf(doc.date), f = gstFiled(ym).r1;
+  if (!f) return true;
+  return confirmBox(`GSTR-1 for ${ymLabel(ym)} is already filed`,
+    `<span class="mono">${esc(doc.no)}</span> is dated ${esc(fmtDate(doc.date))}, and GSTR-1 for ${esc(ymLabel(ym))} was filed on ${esc(fmtDate(f.on))}. ${action === "delete" ? "Deleting" : "Changing"} it here won't change the filed return — tell your CA so they can amend it or issue a credit note.`,
+    action === "delete" ? "Delete anyway" : "Save anyway", action === "delete");
+}
+
+/* ---------- Excel ---------- */
+async function gstWorkbook(ym) {
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
+  const X = window.XLSX, wb = X.utils.book_new(), G = gstMonth(ym), co = set().company;
+  const add = (name, aoa, widths) => { const ws = X.utils.aoa_to_sheet(aoa); ws["!cols"] = widths.map(w => ({wch: w})); X.utils.book_append_sheet(wb, ws, name); };
+  const tpl = (name, title, sumL, sumV, head, rows, widths) => add(name, [[title], sumL, sumV, head, ...rows], widths || head.map(h => Math.max(12, h.length + 2)));
+  const uniq = (a, k) => new Set(a.map(x => x[k])).size;
+  const nv = v => r2(v);
+  const f = gstFiled(ym), due = gstDue(ym);
+  add("Summary", [
+    [`GST return data — ${ymLabel(ym)}`], [],
+    ["Business", co.name], ["GSTIN", co.gstin], ["State", `${ownStateCode()}-${stateName(ownStateCode())}`], ["Return period", ymLabel(ym)], ["Prepared on", fmtDate(todayISO())],
+    ["GSTR-1 due", fmtDate(due.r1), f.r1 ? `Filed ${fmtDate(f.r1.on)} ${f.r1.arn || ""}`.trim() : "Not filed yet"],
+    ["GSTR-3B due", fmtDate(due.r3b), f.r3b ? `Filed ${fmtDate(f.r3b.on)} ${f.r3b.arn || ""}`.trim() : "Not filed yet"], [],
+    ["GSTR-1", "Rows / invoices", "Taxable ₹", "IGST ₹", "CGST ₹", "SGST ₹"],
+    ["B2B (4A)", uniq(G.b2b, "no"), sumBy(G.b2b, "taxable"), sumBy(G.b2b, "igst"), sumBy(G.b2b, "cgst"), sumBy(G.b2b, "sgst")],
+    ["B2C Large (5)", uniq(G.b2cl, "no"), sumBy(G.b2cl, "taxable"), sumBy(G.b2cl, "igst"), 0, 0],
+    ["B2C Small (7)", G.b2cs.reduce((s, x) => s + x.count, 0), sumBy(G.b2cs, "taxable"), sumBy(G.b2cs, "igst"), sumBy(G.b2cs, "cgst"), sumBy(G.b2cs, "sgst")],
+    ["Nil-rated (8)", "", G.out.nil, 0, 0, 0],
+    ["Total", G.inv.length, nv(G.out.taxable + G.out.nil), G.out.igst, G.out.cgst, G.out.sgst], [],
+    ["GSTR-3B (estimate)", "", "Taxable ₹", "IGST ₹", "CGST ₹", "SGST ₹"],
+    ["3.1(a) Outward taxable supplies", "", G.out.taxable, G.out.igst, G.out.cgst, G.out.sgst],
+    ["3.1(c) Nil-rated", "", G.out.nil, "", "", ""],
+    ...G.unregInter.map(u => [`3.2 To unregistered, ${posLabel(u.pos)}`, "", u.taxable, u.igst, "", ""]),
+    [G.g2b ? `4(A)(5) Input credit — GSTR-2B bills matched with your expenses (${G.g2b.matched.length})` : "4(A)(5) Input credit — estimated from Expenses (GSTR-2B not loaded)", "", "", G.credit.igst, G.credit.cgst, G.credit.sgst],
+    ["To pay in cash", "", "", G.cash.igst, G.cash.cgst, G.cash.sgst],
+    ["Credit carried forward", "", "", G.carry.igst, G.carry.cgst, G.carry.sgst], [],
+    ["Problems to fix"], ...(G.errs.length ? G.errs.map(x => [x.no || "", x.m]) : [["", "None"]]), [],
+    ["Worth checking"], ...(G.warns.length ? G.warns.map(x => [x.no || "", x.m]) : [["", "Nothing"]]), [],
+    ["Note", "Sheets b2b,sez,de / b2cl / b2cs / exemp / hsn(b2b) / hsn(b2c) / docs use the GST offline tool's GSTR-1 template columns (headings in row 4, data from row 5)."],
+  ], [44, 18, 16, 14, 14, 14]);
+  tpl("b2b,sez,de", "Summary For B2B, SEZ, DE (4A, 4B, 6B, 6C)",
+    ["No. of Recipients", "", "No. of Invoices", "", "Total Invoice Value", "", "", "", "", "", "", "Total Taxable Value", "Total Cess"],
+    [uniq(G.b2b, "gstin"), "", uniq(G.b2b, "no"), "", r2([...new Map(G.b2b.map(x => [x.no, x.value])).values()].reduce((s, v) => s + v, 0)), "", "", "", "", "", "", sumBy(G.b2b, "taxable"), 0],
+    ["GSTIN/UIN of Recipient", "Receiver Name", "Invoice Number", "Invoice date", "Invoice Value", "Place Of Supply", "Reverse Charge", "Applicable % of Tax Rate", "Invoice Type", "E-Commerce GSTIN", "Rate", "Taxable Value", "Cess Amount"],
+    G.b2b.map(x => [x.gstin, x.name, x.no, fmtDate(x.date), x.value, posLabel(x.pos), "N", "", "Regular B2B", "", x.rate, x.taxable, 0]),
+    [18, 28, 14, 13, 13, 22, 9, 10, 13, 12, 7, 13, 10]);
+  tpl("b2cl", "Summary For B2CL(5)", ["No. of Invoices", "", "Total Inv Value", "", "", "Total Taxable Value", "Total Cess", ""],
+    [uniq(G.b2cl, "no"), "", r2([...new Map(G.b2cl.map(x => [x.no, x.value])).values()].reduce((s, v) => s + v, 0)), "", "", sumBy(G.b2cl, "taxable"), 0, ""],
+    ["Invoice Number", "Invoice date", "Invoice Value", "Place Of Supply", "Applicable % of Tax Rate", "Rate", "Taxable Value", "Cess Amount", "E-Commerce GSTIN"],
+    G.b2cl.map(x => [x.no, fmtDate(x.date), x.value, posLabel(x.pos), "", x.rate, x.taxable, 0, ""]));
+  tpl("b2cs", "Summary For B2CS(7)", ["", "", "", "", "Total Taxable  Value", "Total Cess", ""], ["", "", "", "", sumBy(G.b2cs, "taxable"), 0, ""],
+    ["Type", "Place Of Supply", "Applicable % of Tax Rate", "Rate", "Taxable Value", "Cess Amount", "E-Commerce GSTIN"],
+    G.b2cs.map(x => ["OE", posLabel(x.pos), "", x.rate, x.taxable, 0, ""]), [8, 24, 10, 7, 14, 10, 14]);
+  tpl("exemp", "Summary For Nil rated, exempted and non GST outward supplies (8)", ["", "Total Nil Rated Supplies", "Total Exempted Supplies", "Total Non-GST Supplies"], ["", G.out.nil, 0, 0],
+    ["Description", "Nil Rated Supplies", "Exempted(other than nil rated/non GST supply)", "Non-GST Supplies"],
+    [["Inter-State supplies to registered persons", G.nil.interReg, 0, 0], ["Intra-State supplies to registered persons", G.nil.intraReg, 0, 0],
+     ["Inter-State supplies to unregistered persons", G.nil.interUnreg, 0, 0], ["Intra-State supplies to unregistered persons", G.nil.intraUnreg, 0, 0]], [44, 16, 22, 16]);
+  for (const [name, H] of [["hsn(b2b)", G.hsnB2B], ["hsn(b2c)", G.hsnB2C]]) tpl(name, "Summary For HSN(12)",
+    ["No. of HSN", "", "", "", "Total Value", "", "Total Taxable Value", "Total Integrated Tax", "Total Central Tax", "Total State/UT Tax", "Total Cess"],
+    [uniq(H, "hsn"), "", "", "", sumBy(H, "value"), "", sumBy(H, "taxable"), sumBy(H, "igst"), sumBy(H, "cgst"), sumBy(H, "sgst"), 0],
+    ["HSN", "Description", "UQC", "Total Quantity", "Total Value", "Rate", "Taxable Value", "Integrated Tax Amount", "Central Tax Amount", "State/UT Tax Amount", "Cess Amount"],
+    H.map(x => [x.hsn, String(x.desc || "").slice(0, 30), x.uqc, x.qty, x.value, x.rate, x.taxable, x.igst, x.cgst, x.sgst, 0]), [10, 30, 16, 12, 13, 7, 13, 13, 13, 13, 10]);
+  tpl("docs", "Summary of documents issued during the tax period (13)", ["", "", "", "Total Number", "Total Cancelled"], ["", "", "", G.docs.reduce((s, x) => s + x.total, 0), G.docs.reduce((s, x) => s + x.cancelled, 0)],
+    ["Nature of Document", "Sr. No. From", "Sr. No. To", "Total Number", "Cancelled"], G.docs.map(x => ["Invoices for outward supply", x.from, x.to, x.total, x.cancelled]), [30, 14, 14, 13, 11]);
+  add("Invoice register", [["Invoice No.", "Date", "Client", "Client GSTIN", "Place of supply", "Section", "Taxable ₹", "IGST ₹", "CGST ₹", "SGST ₹", "Invoice total ₹"],
+    ...G.reg.map(x => [x.no, fmtDate(x.date), x.client, x.gstin, posLabel(x.pos), x.sec, x.taxable, x.igst, x.cgst, x.sgst, x.total]),
+    ["Total", "", "", "", "", "", sumBy(G.reg, "taxable"), sumBy(G.reg, "igst"), sumBy(G.reg, "cgst"), sumBy(G.reg, "sgst"), sumBy(G.reg, "total")]], [14, 12, 28, 18, 22, 8, 13, 12, 12, 12, 14]);
+  add("ITC (expenses)", [["Date", "Supplier", "Supplier GSTIN", "Bill No.", "Description", "Basic ₹", "GST %", "IGST ₹", "CGST ₹", "SGST ₹", "Total ₹"],
+    ...G.itc.map(x => [fmtDate(x.date), x.vendor, x.gstin, x.billNo, x.desc, x.basic, x.rate, x.igst, x.cgst, x.sgst, x.amount]),
+    ["Total", "", "", "", "", sumBy(G.itc, "basic"), "", G.credit.igst, G.credit.cgst, G.credit.sgst, sumBy(G.itc, "amount")]], [12, 26, 18, 12, 28, 12, 7, 11, 11, 11, 12]);
+  if (G.g2b) { const R = G.g2b, st = r => r.notmine ? "Not mine (reject in IMS)" : "";
+    const line = (status, r) => [status, r.gstin, r.name, r.inum, fmtDate(r.date), r.val, r.txval, r.igst, r.cgst, r.sgst, r.itc, r.rc ? "Y" : "N", r.exp ? r.exp.vendor : "", r.exp ? r.exp.billNo : "", r.exp ? num(r.exp.gstAmt) : "", r.exp ? r.diff : ""];
+    add("GSTR-2B check", [["Status", "Supplier GSTIN", "Supplier", "Bill No.", "Bill Date", "Value ₹", "Taxable ₹", "IGST ₹", "CGST ₹", "SGST ₹", "ITC available", "Reverse charge", "Your expense", "Your bill no.", "Your GST ₹", "Difference ₹"],
+      ...R.matched.map(r => line("Matched — claim", r)), ...R.probable.map(r => line("Probably same — confirm", r)), ...R.only2b.map(r => line("In 2B, not in expenses", r)),
+      ...R.blocked.map(r => line(r.rc ? "Reverse charge" : "ITC not available", r)), ...R.notmine.map(r => line("Not mine — reject in IMS", r)),
+      ...R.missing.map(x => ["Your bill, not in 2B — remind supplier", expGstin(x), x.vendor, x.billNo, fmtDate(x.billDate || x.date), num(x.amount), num(x.basic), "", "", "", "", "", x.vendor, x.billNo, num(x.gstAmt), ""]),
+      [], ["File", R.D.file, "", "Credit/debit notes in 2B (not matched)", R.cdn]], [26, 18, 26, 14, 12, 12, 12, 11, 11, 11, 8, 8, 22, 14, 11, 11]); }
+  if (G.bills.length) add("Non-GST bills", [["Bill No.", "Date", "Client", "Total ₹"], ...G.bills.map(b => [b.no, fmtDate(b.date), b.client, num(b.total)])], [14, 12, 30, 12]);
+  const blob = new Blob([X.write(wb, {bookType: "xlsx", type: "array"})], {type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"});
+  return {blob, name: `GST ${ym} ${fileSafe(co.name || "VD Enterprise")}.xlsx`, G};
+}
+async function gstDownloadExcel(ym) {
+  if (!S.dl) return toast("Downloads aren't available in this view.", true);
+  toast("Building the GST Excel file…");
+  try { const w = await gstWorkbook(ym); await S.dl.save({filename: w.name, data: w.blob}); toast(`Saved ${w.name}${w.G.errs.length ? ` — ${w.G.errs.length} problem${w.G.errs.length > 1 ? "s" : ""} still to fix` : ""}.`, !!w.G.errs.length); }
+  catch (e) { if (e && e.code === "declined") return; toast("Couldn't build the Excel file: " + (e && e.message || "check the internet connection") + ".", true); }
+}
+
+/* ---------- PDF (A4 pages) ---------- */
+function gstPdfHTML(ym) {
+  const G = gstMonth(ym), co = set().company, due = gstDue(ym), f = gstFiled(ym), o = G.out;
+  const m = v => money(v);
+  const th = (cols) => `<thead><tr>${cols.map(([t, w, r]) => `<th${r ? ' class="r"' : ""}${w ? ` style="width:${w}px"` : ""}>${t}</th>`).join("")}</tr></thead>`;
+  const head = (pg, total) => `<div class="addr"><span><b>${esc(co.name)}</b> · ${esc([co.addr1, co.addr2].filter(Boolean).join(", "))}</span><span>GSTIN: <b>${esc(co.gstin)}</b></span></div>
+    <div class="titleband"><h2>GST RETURN DATA</h2><span class="nogst">${esc(ymLabel(ym))} · page ${pg} of ${total}</span></div>`;
+  const pages = [];
+  const sumRows = [["B2B — registered clients (4A)", new Set(G.b2b.map(x => x.no)).size, sumBy(G.b2b, "taxable"), sumBy(G.b2b, "igst"), sumBy(G.b2b, "cgst"), sumBy(G.b2b, "sgst")],
+    ["B2C large — other state, over ₹1 lakh (5)", new Set(G.b2cl.map(x => x.no)).size, sumBy(G.b2cl, "taxable"), sumBy(G.b2cl, "igst"), 0, 0],
+    ["B2C small (7)", G.b2cs.reduce((s, x) => s + x.count, 0), sumBy(G.b2cs, "taxable"), sumBy(G.b2cs, "igst"), sumBy(G.b2cs, "cgst"), sumBy(G.b2cs, "sgst")],
+    ...(o.nil ? [["Nil-rated (8)", "", o.nil, 0, 0, 0]] : [])];
+  const probs = [...G.errs.map(x => ["✕", x]), ...G.warns.map(x => ["!", x])];
+  pages.push(`
+    <div class="boxes"><div><div class="lbl">Business</div><div class="client">${esc(co.name)}</div><div class="kv"><span>GSTIN</span><b>${esc(co.gstin)}</b><span>State</span><b>${esc(posLabel(ownStateCode()))}</b></div></div>
+      <div><div class="lbl">Return period</div><div class="kv"><span>Month</span><b>${esc(ymLabel(ym))}</b><span>GSTR-1</span><b>${f.r1 ? `Filed ${fmtDate(f.r1.on)}` : `due ${fmtDate(due.r1)}`}</b><span>GSTR-3B</span><b>${f.r3b ? `Filed ${fmtDate(f.r3b.on)}` : `due ${fmtDate(due.r3b)}`}</b><span>Prepared</span><b>${fmtDate(todayISO())}</b></div></div></div>
+    <div class="lbl" style="margin-top:4px">GSTR-1 · sales</div>
+    <table class="items">${th([["Table", 0], ["Invoices", 60, 1], ["Taxable ₹", 100, 1], ["IGST ₹", 90, 1], ["CGST ₹", 90, 1], ["SGST ₹", 90, 1]])}
+      <tbody>${sumRows.map(r => `<tr><td>${esc(r[0])}</td><td class="r">${r[1]}</td>${r.slice(2).map(v => `<td class="r">${m(v)}</td>`).join("")}</tr>`).join("")}
+      <tr><td><b>Total</b></td><td class="r"><b>${G.inv.length}</b></td><td class="r"><b>${m(o.taxable + o.nil)}</b></td><td class="r"><b>${m(o.igst)}</b></td><td class="r"><b>${m(o.cgst)}</b></td><td class="r"><b>${m(o.sgst)}</b></td></tr></tbody></table>
+    <div class="lbl" style="margin-top:4px">GSTR-3B · tax to pay (estimate)</div>
+    <table class="items">${th([["", 0], ["IGST ₹", 100, 1], ["CGST ₹", 100, 1], ["SGST ₹", 100, 1]])}<tbody>
+      <tr><td>3.1(a) GST on outward taxable supplies (taxable ₹${m(o.taxable)})</td><td class="r">${m(o.igst)}</td><td class="r">${m(o.cgst)}</td><td class="r">${m(o.sgst)}</td></tr>
+      <tr><td>4(A)(5) Input credit ${G.g2b ? `— ${G.g2b.matched.length} bill${G.g2b.matched.length === 1 ? "" : "s"} matched with GSTR-2B` : `— estimated from ${G.itc.filter(x => x.gstin).length} expense bills (GSTR-2B not loaded)`}</td><td class="r">${m(G.credit.igst)}</td><td class="r">${m(G.credit.cgst)}</td><td class="r">${m(G.credit.sgst)}</td></tr>
+      <tr><td><b>To pay in cash</b></td><td class="r"><b>${m(G.cash.igst)}</b></td><td class="r"><b>${m(G.cash.cgst)}</b></td><td class="r"><b>${m(G.cash.sgst)}</b></td></tr>
+      <tr><td>Credit carried forward</td><td class="r">${m(G.carry.igst)}</td><td class="r">${m(G.carry.cgst)}</td><td class="r">${m(G.carry.sgst)}</td></tr></tbody></table>
+    <div class="foot"><div class="pay">ESTIMATED GST TO PAY: ₹ ${m(G.cash.igst + G.cash.cgst + G.cash.sgst)}<i>${esc(words(G.cash.igst + G.cash.cgst + G.cash.sgst))}</i></div>
+      <table class="tt"><tbody><tr><td>GST on sales</td><td>${m(o.igst + o.cgst + o.sgst)}</td></tr><tr><td>Input credit</td><td>${m(G.credit.igst + G.credit.cgst + G.credit.sgst)}</td></tr><tr class="g"><td>TO PAY ₹</td><td>${m(G.cash.igst + G.cash.cgst + G.cash.sgst)}</td></tr></tbody></table></div>
+    ${G.docs.length ? `<div class="lbl" style="margin-top:4px">Documents issued (13)</div><div>${G.docs.map(x => `Invoices ${esc(x.from)} to ${esc(x.to)} · ${x.total} in range · ${x.cancelled} cancelled`).join("<br>")}</div>` : ""}
+    ${probs.length ? `<div class="lbl" style="margin-top:4px">Checks</div><ol style="font-size:11px">${probs.slice(0, 12).map(([s, x]) => `<li>${s === "✕" ? "<b>Fix:</b> " : ""}${x.no ? `${esc(x.no)} — ` : ""}${esc(x.m)}</li>`).join("")}${probs.length > 12 ? `<li>…and ${probs.length - 12} more (see the Excel file)</li>` : ""}</ol>` : `<div style="font-size:11px">✓ No problems found.</div>`}
+    <div class="fine" style="margin-top:auto">Prepared with VD Enterprise Desk from saved tax invoices and expenses. GSTR-3B figures are an estimate until checked against GSTR-2B.</div>`);
+  const chunk = (title, cols, rows, per, foot) => { for (let i = 0; i < rows.length; i += per) pages.push(`<div class="lbl">${title}${rows.length > per ? ` (${Math.floor(i / per) + 1})` : ""}</div><table class="items" style="font-size:10.5px">${th(cols)}<tbody>${rows.slice(i, i + per).join("")}${i + per >= rows.length && foot ? foot : ""}</tbody></table>`); };
+  const td = v => `<td class="r">${m(v)}</td>`;
+  chunk("Tax invoice register", [["Invoice", 66], ["Date", 70], ["Client", 0], ["GSTIN / POS", 112], ["Sec", 40], ["Taxable ₹", 74, 1], ["IGST ₹", 64, 1], ["CGST ₹", 56, 1], ["SGST ₹", 56, 1], ["Total ₹", 72, 1]],
+    G.reg.map(x => `<tr><td>${esc(x.no)}</td><td class="nw">${fmtDate(x.date)}</td><td>${esc(x.client)}</td><td style="font-size:10.5px">${esc(x.gstin || posLabel(x.pos))}</td><td>${x.sec}</td>${td(x.taxable)}${td(x.igst)}${td(x.cgst)}${td(x.sgst)}${td(x.total)}</tr>`), 36,
+    `<tr><td colspan="5"><b>Total</b></td>${["taxable", "igst", "cgst", "sgst", "total"].map(k => `<td class="r"><b>${m(sumBy(G.reg, k))}</b></td>`).join("")}</tr>`);
+  const hsnRows = [...G.hsnB2B.map(x => ({...x, t: "B2B"})), ...G.hsnB2C.map(x => ({...x, t: "B2C"}))];
+  chunk("HSN summary (12)", [["Tab", 34], ["HSN", 60], ["Description", 0], ["UQC", 86], ["Qty", 50, 1], ["Rate", 36, 1], ["Taxable ₹", 76, 1], ["IGST ₹", 62, 1], ["CGST ₹", 62, 1], ["SGST ₹", 62, 1]],
+    hsnRows.map(x => `<tr><td>${x.t}</td><td>${esc(x.hsn || "—")}</td><td>${esc(x.desc)}</td><td style="font-size:10.5px">${esc(x.uqc)}</td><td class="r">${x.qty || ""}</td><td class="r">${x.rate}</td>${td(x.taxable)}${td(x.igst)}${td(x.cgst)}${td(x.sgst)}</tr>`), 36);
+  chunk("Expense bills for input credit", [["Date", 70], ["Supplier", 0], ["Supplier GSTIN", 128], ["Bill no.", 70], ["Basic ₹", 76, 1], ["IGST ₹", 62, 1], ["CGST ₹", 62, 1], ["SGST ₹", 62, 1]],
+    G.itc.map(x => `<tr><td class="nw">${fmtDate(x.date)}</td><td>${esc(x.vendor)}</td><td style="font-size:10.5px">${esc(x.gstin || "— no GSTIN —")}</td><td>${esc(x.billNo)}</td>${td(x.basic)}${td(x.igst)}${td(x.cgst)}${td(x.sgst)}</tr>`), 36);
+  if (G.g2b) { const R = G.g2b, rw = (st, r) => `<tr><td>${st}</td><td>${esc(r.name || "—")}<div style="font-size:9.5px">${esc(r.gstin)}</div></td><td>${esc(r.inum)}</td><td class="nw">${fmtDate(r.date)}</td>${td(r.val)}${td(r.tax)}<td>${r.exp ? esc(r.exp.billNo || "—") : ""}</td></tr>`;
+    chunk("Purchases vs GSTR-2B", [["Status", 110], ["Supplier", 0], ["Bill no.", 80], ["Date", 70], ["Value ₹", 76, 1], ["GST ₹", 66, 1], ["Your bill", 76]],
+      [...R.matched.map(r => rw("Matched", r)), ...R.probable.map(r => rw("Probably same", r)), ...R.only2b.map(r => rw("<b>Not in expenses</b>", r)), ...R.blocked.map(r => rw(r.rc ? "Reverse charge" : "ITC not avail.", r)), ...R.notmine.map(r => rw("Not mine — reject", r)),
+       ...R.missing.map(x => `<tr><td><b>Not in 2B</b></td><td>${esc(x.vendor || "—")}<div style="font-size:9.5px">${esc(expGstin(x))}</div></td><td>${esc(x.billNo || "—")}</td><td class="nw">${fmtDate(x.billDate || x.date)}</td>${td(x.amount)}${td(x.gstAmt)}<td></td></tr>`)], 34); }
+  return pages.map((p, i) => `<div class="paper">${head(i + 1, pages.length)}${p}</div>`).join("");
+}
+const gstPdfName = ym => `GST ${ym} summary - ${fileSafe(set().company.name || "VD Enterprise")}.pdf`;
+async function gstDownloadPdf(ym) {
+  if (!S.dl) return toast("Downloads aren't available in this view.", true);
+  const b = $("#gst-pdf"); if (b) b.disabled = true;
+  toast("Making the PDF…");
+  try { await S.dl.save({filename: gstPdfName(ym), data: await htmlToPdfBlob(gstPdfHTML(ym))}); toast("PDF saved."); }
+  catch (e) { if (!(e && e.code === "declined")) toast("Couldn't make the PDF: " + (e && e.message || "unknown error") + ".", true); }
+  finally { if (b) b.disabled = false; }
+}
+function gstMessage(ym) {
+  const G = gstMonth(ym), co = set().company, o = G.out, due = gstDue(ym);
+  const b2b = new Set(G.b2b.map(x => x.no)).size;
+  return [`GST data for ${ymLabel(ym)} — ${co.name}${co.gstin ? ` (GSTIN ${co.gstin})` : ""}`, "",
+    `Tax invoices: ${G.inv.length} (B2B ${b2b}, B2C ${G.inv.length - b2b})`,
+    `Taxable value: ₹${money(o.taxable)}${o.nil ? ` + nil-rated ₹${money(o.nil)}` : ""}`,
+    `CGST ₹${money(o.cgst)} · SGST ₹${money(o.sgst)} · IGST ₹${money(o.igst)}`,
+    G.g2b ? `Input credit (GSTR-2B, ${G.g2b.matched.length} matched bill${G.g2b.matched.length === 1 ? "" : "s"}): ₹${money(G.credit.igst + G.credit.cgst + G.credit.sgst)}${G.g2b.only2b.length || G.g2b.missing.length ? ` — ${G.g2b.only2b.length} in 2B without our bill, ${G.g2b.missing.length} of our bills not in 2B` : ""}`
+          : `Input GST on ${G.itc.filter(x => x.gstin).length} expense bills (GSTR-2B not checked yet): ₹${money(G.credit.igst + G.credit.cgst + G.credit.sgst)}`,
+    `Estimated GST to pay: ₹${money(G.cash.igst + G.cash.cgst + G.cash.sgst)}`, "",
+    `GSTR-1 due ${fmtDate(due.r1)} · GSTR-3B due ${fmtDate(due.r3b)}.`,
+    `Attached: PDF summary + Excel (GSTR-1 tables in offline-tool layout, HSN summary, invoice register, expense bills).`,
+    ...(G.errs.length ? ["", `Note: ${G.errs.length} item${G.errs.length > 1 ? "s" : ""} still marked to fix — listed in the Excel Summary sheet.`] : []),
+    "", "Please file and share the ARN. Thank you."].join("\n");
+}
+function gstShare(ym) {
+  waShare({title: `Send ${ymLabel(ym)} GST to your CA`, phone: waNo(set().defaults.caPhone), text: gstMessage(ym),
+    pdf: async () => {
+      const blob = await htmlToPdfBlob(gstPdfHTML(ym));
+      let more = [];
+      try { const w = await gstWorkbook(ym); more = [{blob: w.blob, name: w.name, type: w.blob.type}]; } catch {}
+      return {blob, name: gstPdfName(ym), more};
+    }});
+}
+
+/* ---------- GSTR-2B (v14): the purchase bills your suppliers reported with your GSTIN ----------
+   The 2B file (Excel, JSON, or the zip the portal gives) is read on this device and kept in
+   IndexedDB as g2b:<email>:<YYYY-MM> = {ym, file, loadedAt, rows, cdn, marks}. It is matched with
+   Expenses (supplier GSTIN + bill no.) — fixes made from here (add bill, same bill) are normal
+   expense edits and sync like any other. */
+S.g2b = {};
+const g2bKey = ym => `g2b:${L.email}:${ym}`;
+async function g2bLoad(ym) {
+  if (S.g2b[ym] !== undefined) return S.g2b[ym];
+  let d = null; try { d = (await kv.get(g2bKey(ym))) || null; } catch {}
+  S.g2b[ym] = d; return d;
+}
+async function g2bSave(ym, d) { S.g2b[ym] = d; if (d) await kv.set(g2bKey(ym), d); else await kv.del(g2bKey(ym)); }
+const normInv = v => String(v || "").toUpperCase().replace(/\d+/g, d => String(Number(d))).replace(/[^A-Z0-9]/g, "");
+const nameKey = v => String(v || "").toUpperCase().replace(/\b(M\/S|MS|THE|SHRI|SHREE|SRI)\b/g, "").replace(/[^A-Z0-9]/g, "");
+const nameLike = (a, b) => { const x = nameKey(a), y = nameKey(b); return !!x && !!y && (x.slice(0, 6) === y.slice(0, 6) || x.includes(y) || y.includes(x)); };
+function g2bDate(v) {
+  if (v == null || v === "") return "";
+  if (typeof v === "number" && window.XLSX) { const d = window.XLSX.SSF.parse_date_code(v); if (d) return `${d.y}-${String(d.m).padStart(2, "0")}-${String(d.d).padStart(2, "0")}`; }
+  const s = String(v).trim();
+  let m = /^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{4})$/.exec(s); if (m) return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  m = /^(\d{1,2})[-\s]([A-Za-z]{3})[A-Za-z]*[-\s,]+(\d{4})$/.exec(s);
+  if (m) { const k = MON.findIndex(x => x.toLowerCase() === m[2].toLowerCase()); if (k >= 0) return `${m[3]}-${String(k + 1).padStart(2, "0")}-${m[1].padStart(2, "0")}`; }
+  m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s); if (m) return m[0];
+  return "";
+}
+function g2bAdd(map, r) {
+  const k = r.gstin + "|" + normInv(r.inum);
+  const x = map.get(k) || {key: k, gstin: r.gstin, name: String(r.name || "").trim(), inum: String(r.inum).trim(), date: r.date, val: 0, txval: 0, igst: 0, cgst: 0, sgst: 0, itc: "Y", rc: false, rates: [], period: String(r.period || "")};
+  x.val = Math.max(x.val, num(r.val)); x.txval += num(r.txval); x.igst += num(r.igst); x.cgst += num(r.cgst); x.sgst += num(r.sgst);
+  if (r.rate !== "" && r.rate != null && !x.rates.includes(num(r.rate))) x.rates.push(num(r.rate));
+  if (r.itc === "N") x.itc = "N";
+  if (r.rc) x.rc = true;
+  map.set(k, x);
+}
+function g2bDone(map) {
+  return [...map.values()].map(x => { for (const k of ["txval", "igst", "cgst", "sgst"]) x[k] = r2(x[k]); x.tax = r2(x.igst + x.cgst + x.sgst); if (!x.val) x.val = r2(x.txval + x.tax); return x; })
+    .sort((a, b) => (a.date + a.name).localeCompare(b.date + b.name));
+}
+function g2bFromJSON(o) {
+  const root = o && o.data && o.data.data ? o.data.data : o && o.data && (o.data.docdata || o.data.rtnprd) ? o.data : o;
+  const dd = (root && (root.docdata || root.docData)) || {};
+  if (!dd.b2b && !dd.cdnr && !root.rtnprd) throw new Error("This JSON doesn't look like a GSTR-2B file.");
+  const map = new Map();
+  for (const s of dd.b2b || []) for (const inv of s.inv || []) {
+    const items = inv.items || inv.itms || [];
+    const base = {gstin: String(s.ctin || "").toUpperCase(), name: s.trdnm || "", inum: inv.inum, date: g2bDate(inv.dt || inv.idt), val: inv.val,
+      itc: String(inv.itcavl || "Y").toUpperCase().startsWith("N") ? "N" : "Y", rc: String(inv.rev || inv.rchrg || "N").toUpperCase() === "Y", period: s.supprd || ""};
+    if (!items.length) g2bAdd(map, {...base, txval: inv.txval, igst: inv.igst, cgst: inv.cgst, sgst: inv.sgst, rate: ""});
+    for (const it of items) { const d = it.itm_det || it; g2bAdd(map, {...base, txval: d.txval, igst: d.igst ?? d.iamt, cgst: d.cgst ?? d.camt, sgst: d.sgst ?? d.samt, rate: d.rt ?? ""}); }
+  }
+  const cdn = (dd.cdnr || []).reduce((s, x) => s + (x.nt || []).length, 0);
+  const rp = String(root.rtnprd || "");
+  return {rows: g2bDone(map), cdn, ym: /^\d{6}$/.test(rp) ? `${rp.slice(2)}-${rp.slice(0, 2)}` : "", gstin: String(root.gstin || "").toUpperCase()};
+}
+function g2bFromSheets(X, wb) {
+  const nm = n => String(n).toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const isG = v => /^\d{2}[A-Z]{5}\d{4}[A-Z][0-9A-Z]{3}$/.test(String(v || "").trim().toUpperCase());
+  const grid = name => X.utils.sheet_to_json(wb.Sheets[name], {header: 1, raw: true, defval: ""});
+  const parse = name => {
+    const A = grid(name);
+    const hi = A.findIndex(r => r.some(c => /gstin\s*of\s*(the\s*)?supplier/i.test(String(c))));
+    if (hi < 0) return null;
+    const top = [...A[hi]], sub = A[hi + 1] || [];
+    const twoRow = !sub.some(isG);
+    if (twoRow) for (let j = 1; j < Math.max(top.length, sub.length); j++) if (String(top[j] ?? "") === "" && String(sub[j] ?? "") !== "") top[j] = top[j - 1];
+    const H = Array.from({length: Math.max(top.length, sub.length)}, (_, j) => `${top[j] ?? ""} ${twoRow ? sub[j] ?? "" : ""}`.replace(/\s+/g, " ").trim().toLowerCase());
+    const col = (re, not) => H.findIndex(h => re.test(h) && !(not && not.test(h)));
+    const c = {gstin: col(/gstin/), name: col(/trade|legal/), inum: col(/invoice number|invoice no|note number|note no|document number/), date: col(/invoice date|note date|document date/),
+      val: col(/invoice value|note value|document value/), txval: col(/taxable/), igst: col(/integrated/), cgst: col(/central/), sgst: col(/state\s*\/\s*ut|state tax|state\/ut/, /place/),
+      itc: col(/itc avail/), rc: col(/reverse/), rate: col(/rate/, /applicable/), period: col(/period/)};
+    const at = (r, k) => c[k] < 0 ? "" : r[c[k]];
+    const rows = A.slice(hi + (twoRow ? 2 : 1)).filter(r => isG(at(r, "gstin")));
+    return {c, rows, at};
+  };
+  const b2b = wb.SheetNames.find(n => nm(n) === "B2B");
+  if (!b2b) throw new Error("No “B2B” sheet in this file — is it the GSTR-2B Excel from the GST portal?");
+  const P = parse(b2b);
+  if (!P) throw new Error("Couldn't find the “GSTIN of supplier” heading in the B2B sheet.");
+  if (P.c.inum < 0 || P.c.txval < 0) throw new Error("The B2B sheet has no invoice number or taxable value column.");
+  const map = new Map();
+  for (const r of P.rows) g2bAdd(map, {gstin: String(P.at(r, "gstin")).trim().toUpperCase(), name: P.at(r, "name"), inum: P.at(r, "inum"), date: g2bDate(P.at(r, "date")), val: P.at(r, "val"),
+    txval: P.at(r, "txval"), igst: P.at(r, "igst"), cgst: P.at(r, "cgst"), sgst: P.at(r, "sgst"), rate: P.at(r, "rate"),
+    itc: /^\s*n/i.test(String(P.at(r, "itc"))) ? "N" : "Y", rc: /^\s*y/i.test(String(P.at(r, "rc"))), period: P.at(r, "period")});
+  const cdnName = wb.SheetNames.find(n => nm(n) === "B2BCDNR" || nm(n) === "CDNR");
+  const C = cdnName ? parse(cdnName) : null;
+  let ym = "";
+  for (const n of wb.SheetNames.slice(0, 3)) {
+    const txt = grid(n).slice(0, 12).flat().map(String).join(" ");
+    const m = new RegExp(`(?:tax period|return period)\\D{0,12}(${MONTHS_FULL.join("|")})`, "i").exec(txt);
+    const fy = /(?:financial year)\D{0,12}(\d{4})\s*-\s*(\d{2,4})/i.exec(txt);
+    if (m && fy) { const mi = MONTHS_FULL.findIndex(x => x.toLowerCase() === m[1].toLowerCase()) + 1; ym = `${mi >= 4 ? fy[1] : Number(fy[1]) + 1}-${String(mi).padStart(2, "0")}`; break; }
+  }
+  return {rows: g2bDone(map), cdn: C ? C.rows.length : 0, ym, gstin: ""};
+}
+async function g2bReadFile(file) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const isZip = buf[0] === 0x50 && buf[1] === 0x4b;
+  const text = b => new TextDecoder().decode(b);
+  if (!isZip && (buf[0] === 0x7b || /\.json$/i.test(file.name))) return g2bFromJSON(JSON.parse(text(buf)));
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js");
+  const X = window.XLSX;
+  if (isZip) {
+    const z = X.CFB.read(buf, {type: "array"});
+    if (!z.FullPaths.some(p => /\[Content_Types\]\.xml$/i.test(p))) {
+      const i = z.FullPaths.findIndex(p => /\.json$/i.test(p)), j = z.FullPaths.findIndex(p => /\.xlsx?$/i.test(p));
+      if (i >= 0) return g2bFromJSON(JSON.parse(text(new Uint8Array(z.FileIndex[i].content))));
+      if (j >= 0) return g2bFromSheets(X, X.read(new Uint8Array(z.FileIndex[j].content), {type: "array"}));
+      throw new Error("This zip has no GSTR-2B JSON or Excel file inside.");
+    }
+  }
+  return g2bFromSheets(X, X.read(buf, {type: "array"}));
+}
+async function g2bImport(ym, file) {
+  toast("Reading the GSTR-2B file…");
+  let d;
+  try { d = await g2bReadFile(file); } catch (e) { return toast("Couldn't read that file: " + (e && e.message || e), true, 9000); }
+  if (!d.rows.length && !d.cdn) return toast("No supplier bills found in that file (B2B section is empty).", true, 7000);
+  const own = String(set().company.gstin || "").toUpperCase();
+  if (d.gstin && own && d.gstin !== own && !(await confirmBox("Different GSTIN", `This GSTR-2B belongs to GSTIN <b>${esc(d.gstin)}</b>, not yours (${esc(own)}). Load it anyway?`, "Load anyway", true))) return;
+  if (d.ym && d.ym !== ym) {
+    if (!(await confirmBox("Different month", `This file is GSTR-2B for <b>${esc(ymLabel(d.ym))}</b>, but the screen shows ${esc(ymLabel(ym))}. Load it for ${esc(ymLabel(d.ym))}?`, `Load for ${ymLabel(d.ym)}`))) return;
+    ym = d.ym; S.gstYm = ym;
+  }
+  const old = await g2bLoad(ym);
+  await g2bSave(ym, {ym, file: file.name, loadedAt: nowISO(), rows: d.rows, cdn: d.cdn, marks: (old && old.marks) || {}});
+  render();
+  toast(`GSTR-2B for ${ymLabel(ym)} loaded: ${d.rows.length} bill${d.rows.length === 1 ? "" : "s"} from ${new Set(d.rows.map(r => r.gstin)).size} supplier${d.rows.length === 1 ? "" : "s"}.`);
+}
+
+/* Match GSTR-2B with Expenses: 1) same supplier GSTIN + bill no.; 2) same supplier (or similar name) + same amount ±₹1 within 90 days */
+function g2bRecon(ym) {
+  const D = S.g2b[ym]; if (!D) return null;
+  const exps = S.expenses.map(x => ({x, g: expGstin(x), k: normInv(x.billNo), d: x.billDate || x.date || ""}));
+  const used = new Set(), rows = D.rows.map(r => ({...r, exp: null, probable: false}));
+  for (const r of rows) {
+    const k = normInv(r.inum), e = exps.find(e => !used.has(e.x.id) && e.g === r.gstin && e.k && e.k === k);
+    if (e) { used.add(e.x.id); r.exp = e.x; }
+  }
+  for (const r of rows) if (!r.exp) {
+    const e = exps.find(e => !used.has(e.x.id) && (e.g === r.gstin || (!e.g && nameLike(e.x.vendor, r.name))) && Math.abs(num(e.x.amount) - r.val) <= 1 && (!r.date || !e.d || Math.abs(daysBetween(e.d, r.date)) <= 90));
+    if (e) { used.add(e.x.id); r.exp = e.x; r.probable = true; }
+  }
+  const out = {D, rows, matched: [], probable: [], only2b: [], blocked: [], notmine: [], missing: [], cdn: D.cdn || 0};
+  for (const r of rows) {
+    r.diff = r.exp ? r2(r.tax - num(r.exp.gstAmt)) : 0;
+    if ((D.marks || {})[r.key] === "notmine") out.notmine.push(r);
+    else if (r.itc === "N" || r.rc) out.blocked.push(r);
+    else if (r.exp && !r.probable) out.matched.push(r);
+    else if (r.exp) out.probable.push(r);
+    else out.only2b.push(r);
+  }
+  out.missing = S.expenses.filter(x => !used.has(x.id) && num(x.gstAmt) > 0 && expGstin(x) && ymOf(x.billDate || x.date) === ym)
+    .sort((a, b) => (a.billDate || a.date || "").localeCompare(b.billDate || b.date || ""));
+  out.claim = {igst: sumBy(out.matched, "igst"), cgst: sumBy(out.matched, "cgst"), sgst: sumBy(out.matched, "sgst")};
+  return out;
+}
+
+function g2bCard(ym, G) {
+  const R = G.g2b, n = v => `<td class="n">${money(v)}</td>`;
+  const tbl = (head, rows) => `<div class="tbl-wrap"><table class="t"><thead><tr>${head.map(h => `<th${/₹/.test(h) ? ' class="n"' : ""}>${h}</th>`).join("")}</tr></thead><tbody>${rows.join("") || `<tr><td colspan="${head.length}" class="empty">None.</td></tr>`}</tbody></table></div>`;
+  const sec = (title, sub, body, open) => `<details class="gx" ${open ? "open" : ""}><summary><b>${title}</b><span class="muted">${sub}</span></summary>${body}</details>`;
+  const head = `<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap"><div><h2 style="margin:0 0 4px">Purchases — compare with GSTR-2B</h2>
+    <p class="muted" style="margin:0;font-size:13px">GSTR-2B is the list of purchase bills your suppliers reported with your GSTIN. Input credit can only be claimed for bills in it.</p></div>
+    <div class="row" style="gap:6px">${R ? `<button class="btn" data-g2b-load>Load a newer file…</button><button class="btn ghost" data-g2b-clear>Remove</button>` : `<button class="btn primary" data-g2b-load>Load GSTR-2B file…</button>`}</div></div>`;
+  if (!R) return `<div class="card">${head}
+    <ol class="muted" style="margin:10px 0 0;padding-left:20px;font-size:13.5px;display:grid;gap:3px">
+      <li>On <b>gst.gov.in</b>, log in → Returns Dashboard → pick the year and <b>${esc(ymLabel(ym))}</b> → GSTR-2B (it's ready on the 14th of the next month).</li>
+      <li>Press <b>Download</b> and get the <b>Excel</b> (or JSON) file. The zip the portal sometimes gives is fine too.</li>
+      <li>Press <b>Load GSTR-2B file…</b> here. The app matches every bill with your Expenses.</li></ol></div>`;
+  const T = a => money(a.reduce((s, r) => s + r.tax, 0));
+  const sup = r => `<td>${esc(r.name || "—")}<div class="mono muted" style="font-size:11.5px">${esc(r.gstin)}</div></td>`;
+  const expCell = x => x ? `<td>${esc(x.vendor || "—")}<div class="mono muted" style="font-size:11.5px">${esc(x.billNo || "no bill no.")}${x.billDate || x.date ? ` · ${esc(fmtDate(x.billDate || x.date))}` : ""} · ₹${money(x.amount)}</div></td>` : "<td></td>";
+  const total = R.rows.length;
+  return `<div class="card">${head}
+    <p class="muted" style="margin:8px 0 10px;font-size:12.5px">File: ${esc(R.D.file)} · loaded ${esc(ago(R.D.loadedAt))} on this device · ${total} bill${total === 1 ? "" : "s"} from ${new Set(R.rows.map(r => r.gstin)).size} supplier${total === 1 ? "" : "s"}</p>
+    <div class="grid g4" style="margin-bottom:6px">
+      <div class="stat"><span class="k">Matched — credit to claim</span><span class="v">${money0(R.claim.igst + R.claim.cgst + R.claim.sgst)}</span><span class="s">${R.matched.length} bill${R.matched.length === 1 ? "" : "s"}</span></div>
+      <div class="stat ${R.only2b.length ? "alert" : ""}"><span class="k">In 2B, not in your expenses</span><span class="v">${R.only2b.length}</span><span class="s">GST ₹${T(R.only2b)}</span></div>
+      <div class="stat ${R.probable.length ? "alert" : ""}"><span class="k">Looks the same — confirm</span><span class="v">${R.probable.length}</span><span class="s">GST ₹${T(R.probable)}</span></div>
+      <div class="stat ${R.missing.length ? "alert" : ""}"><span class="k">Your bills not in 2B yet</span><span class="v">${R.missing.length}</span><span class="s">GST ₹${money(R.missing.reduce((s, x) => s + num(x.gstAmt), 0))}</span></div>
+    </div>
+    ${sec("In GSTR-2B, not in your expenses", R.only2b.length ? "add the bill to claim the credit — or mark Not mine and reject it in IMS on the portal" : "none",
+      tbl(["Supplier", "Bill no.", "Date", "Value ₹", "Taxable ₹", "GST ₹", ""], R.only2b.map(r => `<tr>${sup(r)}<td class="mono">${esc(r.inum)}</td><td class="nw">${fmtDate(r.date)}</td>${n(r.val)}${n(r.txval)}${n(r.tax)}
+        <td><div class="row" style="flex-wrap:nowrap;gap:4px"><button class="btn sm primary" data-g2b-add="${esc(r.key)}">Add as expense</button><button class="btn sm ghost" data-g2b-notmine="${esc(r.key)}">Not mine</button></div></td></tr>`)), R.only2b.length)}
+    ${R.probable.length ? sec("Looks the same — confirm", "same supplier and amount, but the bill no. or GSTIN differs",
+      tbl(["In GSTR-2B", "Bill no. · date", "GST ₹", "Your expense", ""], R.probable.map(r => `<tr>${sup(r)}<td class="mono nw">${esc(r.inum)} · ${fmtDate(r.date)}</td>${n(r.tax)}${expCell(r.exp)}
+        <td><button class="btn sm primary" data-g2b-same="${esc(r.key)}" title="Copies the GSTIN, bill no. and date from GSTR-2B onto your expense">Same bill</button></td></tr>`)), true) : ""}
+    ${sec("Your bills not in GSTR-2B yet", R.missing.length ? "the supplier hasn't reported them (or the GSTIN / bill no. is different) — remind them" : "none",
+      tbl(["Supplier", "Bill no. · date", "Amount ₹", "GST ₹", ""], R.missing.map(x => `<tr><td>${esc(x.vendor || "—")}<div class="mono muted" style="font-size:11.5px">${esc(expGstin(x))}</div></td><td class="mono nw">${esc(x.billNo || "—")} · ${fmtDate(x.billDate || x.date)}</td>${n(x.amount)}${n(x.gstAmt)}
+        <td><div class="row" style="flex-wrap:nowrap;gap:4px"><button class="btn sm wa" data-g2b-remind="${esc(x.id)}">📲 Remind</button><button class="btn sm" data-editexp="${esc(x.id)}">Edit</button></div></td></tr>`)), R.missing.length)}
+    ${sec("Matched", `${R.matched.length} bill${R.matched.length === 1 ? "" : "s"} · GST ₹${T(R.matched)}`,
+      tbl(["Supplier", "Bill no. · date", "2B GST ₹", "Your GST ₹", "Difference ₹"], R.matched.map(r => `<tr>${sup(r)}<td class="mono nw">${esc(r.inum)} · ${fmtDate(r.date)}</td>${n(r.tax)}${n(r.exp.gstAmt)}<td class="n ${Math.abs(r.diff) >= 1 ? "bad-t" : ""}">${Math.abs(r.diff) >= 1 ? money(r.diff) : "—"}</td></tr>`)))}
+    ${R.blocked.length ? sec("Not counted — ITC not available / reverse charge", `${R.blocked.length} bill${R.blocked.length === 1 ? "" : "s"} · your CA decides`,
+      tbl(["Supplier", "Bill no. · date", "GST ₹", "Why"], R.blocked.map(r => `<tr>${sup(r)}<td class="mono nw">${esc(r.inum)} · ${fmtDate(r.date)}</td>${n(r.tax)}<td>${r.rc ? "Reverse charge — you pay this tax" : "Portal says ITC not available"}</td></tr>`))) : ""}
+    ${R.notmine.length ? sec("Marked “Not mine”", "reject these in IMS on the GST portal before GSTR-3B is filed",
+      tbl(["Supplier", "Bill no. · date", "GST ₹", ""], R.notmine.map(r => `<tr>${sup(r)}<td class="mono nw">${esc(r.inum)} · ${fmtDate(r.date)}</td>${n(r.tax)}<td><button class="btn sm ghost" data-g2b-undo="${esc(r.key)}">Undo</button></td></tr>`)), true) : ""}
+  </div>`;
+}
+
+function g2bWire(ym) {
+  const R = () => g2bRecon(ym), row = k => (R() || {rows: []}).rows.find(r => r.key === k);
+  let fi = $("#g2b-file");
+  if (!fi) { fi = document.createElement("input"); fi.type = "file"; fi.id = "g2b-file"; fi.accept = ".xlsx,.xls,.json,.zip,application/json,application/zip"; fi.hidden = true; document.body.appendChild(fi); }
+  fi.onchange = () => { const f = fi.files[0]; fi.value = ""; if (f) g2bImport(S.gstYm, f); };
+  $$("[data-g2b-load]").forEach(b => b.addEventListener("click", () => fi.click()));
+  $$("[data-g2b-clear]").forEach(b => b.addEventListener("click", async () => {
+    if (!(await confirmBox("Remove the GSTR-2B file?", `The ${esc(ymLabel(ym))} GSTR-2B data and your “Not mine” marks are removed from this device. Your expenses stay as they are.`, "Remove", true))) return;
+    await g2bSave(ym, null); S.g2b[ym] = null; render();
+  }));
+  const mark = async (k, v) => { const D = S.g2b[ym]; D.marks = D.marks || {}; if (v) D.marks[k] = v; else delete D.marks[k]; await g2bSave(ym, D); render(); };
+  $$("[data-g2b-notmine]").forEach(b => b.addEventListener("click", async () => {
+    const r = row(b.dataset.g2bNotmine); if (!r) return;
+    if (await confirmBox("Not your bill?", `${esc(r.name || r.gstin)} · <span class="mono">${esc(r.inum)}</span> · ₹${money(r.val)}.<br><br>It won't be counted here. To stop it reaching your GSTR-3B, <b>reject it in IMS</b> on the GST portal (or ask your CA) before GSTR-3B is filed.`, "Mark Not mine")) mark(r.key, "notmine");
+  }));
+  $$("[data-g2b-undo]").forEach(b => b.addEventListener("click", () => mark(b.dataset.g2bUndo, null)));
+  $$("[data-g2b-same]").forEach(b => b.addEventListener("click", async () => {
+    const r = row(b.dataset.g2bSame); if (!r || !r.exp) return;
+    if (!(await confirmBox("Same bill?", `Your expense <b>${esc(r.exp.vendor || "")}</b> (${esc(r.exp.billNo || "no bill no.")}, ₹${money(r.exp.amount)}) gets the supplier GSTIN <span class="mono">${esc(r.gstin)}</span>, bill no. <span class="mono">${esc(r.inum)}</span>${r.date ? ` and bill date ${esc(fmtDate(r.date))}` : ""} from GSTR-2B.`, "Yes, same bill"))) return;
+    write(db => db.doc("expenses/" + r.exp.id).update({gstin: r.gstin, billNo: r.inum, ...(r.date ? {billDate: r.date} : {})}), "Expense updated — matched with GSTR-2B.");
+  }));
+  $$("[data-g2b-add]").forEach(b => b.addEventListener("click", () => { const r = row(b.dataset.g2bAdd); if (r) g2bAddExpense(r); }));
+  $$("[data-g2b-remind]").forEach(b => b.addEventListener("click", () => {
+    const x = S.expenses.find(z => z.id === b.dataset.g2bRemind); if (!x) return;
+    const g = expGstin(x), c = S.clients.find(z => String(z.gstin || "").toUpperCase() === g) || clientOf(x.vendor), co = set().company;
+    waShare({title: `Remind ${x.vendor || "the supplier"}`, phone: waNo(c && c.phone), text: [
+      `Namaste${c && c.contact ? " " + c.contact : ""},`, "",
+      `This is ${co.name}${co.gstin ? ` (GSTIN ${co.gstin})` : ""}. Your bill ${x.billNo ? "no. " + x.billNo + " " : ""}dated ${fmtDate(x.billDate || x.date)} for ₹${money(x.amount)} (GST ₹${money(x.gstAmt)}) doesn't show in our GSTR-2B for ${ymLabel(ym)}.`, "",
+      `Please include it in your GSTR-1 with our GSTIN ${co.gstin || ""} so we can take the input credit. If it's already filed, please check the GSTIN and bill no. used.`, "", "Thank you."].join("\n")});
+  }));
+}
+async function g2bAddExpense(r) {
+  const L2 = set().lists, cats = L2.categories || [], cl = S.clients.find(c => String(c.gstin || "").toUpperCase() === r.gstin);
+  const vendor = cl ? cl.name : r.name || r.gstin, rate = r.rates.length === 1 ? r.rates[0] / 100 : r.txval ? rnd(r.tax / r.txval, 4) : 0;
+  const nameTaken = !cl && S.clients.some(c => key(c.name) === key(vendor));
+  const res = await modal({title: `Add bill ${r.inum} as an expense`,
+    body: `<p style="margin:0 0 10px">${esc(vendor)} · <span class="mono">${esc(r.gstin)}</span> · ${esc(fmtDate(r.date))}<br>Value ₹${money(r.val)} = taxable ₹${money(r.txval)} + GST ₹${money(r.tax)}${r.igst ? ` (IGST)` : ` (CGST ₹${money(r.cgst)} + SGST ₹${money(r.sgst)})`}</p>
+      <div class="grid g2">
+        <label class="f" for="ga-cat">Category<select class="inp fill" id="ga-cat" data-req="1">${optList(cats, cats.find(c => /purchas|material|paper|stock/i.test(c)) || "", "Pick one")}</select></label>
+        <label class="f" for="ga-vert">Vertical<select class="inp fill" id="ga-vert">${optList(L2.verticals, L2.verticals?.[0])}</select></label>
+        <label class="f" for="ga-from">Paid from<select class="inp fill" id="ga-from">${optList(L2.accounts, "", "—")}</select></label>
+        <label class="f" for="ga-desc">Description<input class="inp fill" id="ga-desc" value="Purchase bill ${esc(r.inum)}"></label>
+      </div>
+      ${!cl && !nameTaken ? `<label style="display:flex;gap:8px;align-items:center;margin-top:10px;font-size:14px"><input type="checkbox" id="ga-client" checked> Also add ${esc(vendor)} to Clients as a supplier</label>` : ""}`,
+    actions: [{label: "Cancel", value: false, cls: "ghost"}, {label: "Add expense", value: true, cls: "primary", collect: s => {
+      const errs = vCheck(s); if (errs.length) return vFail(errs, s);
+      return {cat: $("#ga-cat", s).value, vert: $("#ga-vert", s).value, from: $("#ga-from", s).value, desc: $("#ga-desc", s).value.trim(), client: !!$("#ga-client", s)?.checked};
+    }}]});
+  if (!res?.value) return;
+  const f = res.data;
+  write(async db => {
+    await db.collection("expenses").add({date: r.date || todayISO(), vertical: f.vert, category: f.cat, vendor, gstin: r.gstin, billNo: r.inum, billDate: r.date, desc: f.desc, paidFrom: f.from,
+      amount: r2(r.val), gst: rate, gstAmt: r.tax, basic: r.txval, linked: "", notes: "", src: "GSTR-2B", createdAt: new Date().toISOString()});
+    if (f.client) await db.collection("clients").add({name: vendor, role: "Supplier", gstin: r.gstin, pan: r.gstin.slice(2, 12), pos: stateName(r.gstin.slice(0, 2)), address: "", contact: "", phone: "", email: "", type: L2.verticals?.[0] || "", notes: "Added from GSTR-2B"});
+  }, `Added ${r.inum} from ${vendor} — matched with GSTR-2B.`);
+}
+</script>
+
 <style>
 .syncb{margin-top:auto;display:flex;gap:8px;align-items:center;width:100%;text-align:left;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;cursor:pointer;color:var(--ink-2);font-size:12.5px;line-height:1.3}
 .syncb:hover{border-color:var(--line-2)}
@@ -2657,6 +3434,25 @@ details.setup[open] summary{margin-bottom:10px}
 table.lines td.rm,table.lines th.rm{width:34px;padding:0 2px;text-align:center}
 table.lines td.rm .btn{padding:4px 7px;color:var(--muted)}
 table.lines td.rm .btn:hover{color:var(--bad)}
+/* GST filing (v13) */
+details.gx{border-top:1px solid var(--line);padding:8px 0}
+details.gx>summary{cursor:pointer;display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;list-style:none;padding:4px 0}
+details.gx>summary::-webkit-details-marker{display:none}
+details.gx>summary::before{content:"▸";color:var(--muted);width:12px;display:inline-block;transition:transform .15s}
+details.gx[open]>summary::before{transform:rotate(90deg)}
+details.gx>summary .muted{font-size:13px}
+details.gx .tbl-wrap{margin-top:8px}
+ul.gprob{list-style:none;margin:0;padding:0;display:grid;gap:6px;font-size:14px}
+ul.gprob li{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:6px 10px;border-radius:8px}
+ul.gprob li.e{background:var(--bad-bg);color:var(--bad)}
+ul.gprob li.w{background:var(--warn-bg);color:var(--warn)}
+ul.gprob li .btn{flex:none}
+.gfiled{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;margin-bottom:8px;font-size:14px}
+.gfiled.ok{background:var(--good-bg);border-color:transparent}
+.gfiled.late{background:var(--bad-bg);border-color:transparent;color:var(--bad)}
+tr.gpay td{font-weight:700;border-top:2px solid var(--line-2)}
+td.nw{white-space:nowrap}
+.paper td.nw{white-space:nowrap}
 </style>
 <div id="gate" hidden></div>
 <input type="file" id="file-import" accept=".json,application/json" hidden>
@@ -2672,7 +3468,7 @@ const CONFIG = {
   GOOGLE_CLIENT_ID: "906950619673-treueirc5fommes2r2disej8vpdoo42j.apps.googleusercontent.com",                 // e.g. "1234567890-abc123.apps.googleusercontent.com"
   SHEET_NAME: "VD Enterprise Desk Data" // the Google Sheet created in the user's Drive
 };
-const APP_VERSION = "12.1 (10 Nov 2026)";
+const APP_VERSION = "14 (10 Nov 2026)";
 const SCOPES = "openid email profile https://www.googleapis.com/auth/drive.file";
 /* Small on-screen sync log (Google & backup screen) — helps find problems on phones */
 const SYNCLOG = [];
@@ -2861,7 +3657,7 @@ const SPEC = {
   ratecard: {tab: "Rate Card", cols: [["Item", "item"], ["Category", "category"], ["HSN/SAC", "hsn"], ["Unit", "unit"], ["Rate", "rate", "n"], ["Cost", "cost", "n?"], ["GST Rate", "gst", "n"], ["Times Sold", "sold", "n"], ["Last Sold", "lastSold"], ["Lowest", "low", "n?"], ["Highest", "high", "n?"]]},
   docs:     {tab: "Documents", json: true, cols: [["Doc No.", "no"], ["Document", "type"], ["GST / Non-GST", "docType"], ["Date", "date"], ["Client", "client"], ["What it's for", "summary"], ["Taxable", "taxable", "n"], ["GST", "gstAmt", "n"], ["Total", "total", "n"], ["Status", "status"], ["Converted To", "converted"], ["Follow-up On", "followUp"], ["Notes", "notes"], ["Source", "source"], ["Kind", "kind"]]},
   payments: {tab: "Payments", cols: [["Date", "date"], ["Received / Paid", "dir"], ["Against Doc No.", "against"], ["Client / Party", "party"], ["Amount", "amount", "n"], ["Mode", "mode"], ["Account", "account"], ["Ref / UTR", "ref"], ["Notes", "notes"], ["Created", "createdAt"]]},
-  expenses: {tab: "Expenses", cols: [["Date", "date"], ["Vertical", "vertical"], ["Category", "category"], ["Paid To", "vendor"], ["Description", "desc"], ["Paid From", "paidFrom"], ["Amount (incl. GST)", "amount", "n"], ["GST Rate", "gst", "n"], ["GST Amount", "gstAmt", "n"], ["Basic Amount", "basic", "n"], ["Linked Job", "linked"], ["Bill No.", "billNo"], ["Notes", "notes"], ["Created", "createdAt"]]},
+  expenses: {tab: "Expenses", cols: [["Date", "date"], ["Vertical", "vertical"], ["Category", "category"], ["Paid To", "vendor"], ["Description", "desc"], ["Paid From", "paidFrom"], ["Amount (incl. GST)", "amount", "n"], ["GST Rate", "gst", "n"], ["GST Amount", "gstAmt", "n"], ["Basic Amount", "basic", "n"], ["Linked Job", "linked"], ["Bill No.", "billNo"], ["Notes", "notes"], ["Created", "createdAt"], ["Supplier GSTIN", "gstin"], ["Bill Date", "billDate"], ["Added From", "src"]]},
 };
 const TABS = ["Settings", ...COLLS.map(c => SPEC[c].tab)];
 const q1 = t => `'${t.replace(/'/g, "''")}'`;
@@ -3186,7 +3982,7 @@ async function exportExcel() {
   add("Quotations", quotes().map(q => ({"Quote No.": q.no, Date: q.date, Client: q.client, Vertical: q.vertical, "What it's for": q.summary, "Taxable ₹": q.taxable, "GST ₹": q.gstAmt, "Total ₹": q.total, "Valid Until": q.validUntil, Status: q.status, "Converted to Invoice": q.converted, "Follow-up On": q.followUp, Notes: q.notes, "Doc Type": q.docType})));
   add("Invoices", invoices().map(i => ({"Invoice No.": i.no, Date: i.date, Client: i.client, "Client PO No.": i.poNo || "", "PO Date": i.poDate || "", Vertical: i.vertical, "What it's for": i.summary, "Taxable ₹": i.taxable, "GST ₹": i.gstAmt, "Total ₹": i.total, "Cost ₹": i.cost, "Margin ₹": i.margin, "Received ₹": i.received, "Balance ₹": i.balance, "Due Date": i.due, Status: i.status, "Days Overdue": i.overdue, Notes: i.notes, "Doc Type": i.docType})));
   add("Payments", S.payments.map(p => ({Date: p.date, "Received / Paid": p.dir, "Against Doc No.": p.against, "Client / Party": p.party, "Amount ₹": p.amount, Mode: p.mode, Account: p.account, "Ref / UTR": p.ref, Notes: p.notes})));
-  add("Expenses", S.expenses.map(x => ({Date: x.date, Vertical: x.vertical, Category: x.category, "Paid To": x.vendor, Description: x.desc, "Paid From": x.paidFrom, "Amount ₹ (incl. GST)": x.amount, "GST %": num(x.gst) * 100, "GST ₹": x.gstAmt, "Basic ₹": x.basic, "Linked Job": x.linked, "Bill No.": x.billNo, Notes: x.notes})));
+  add("Expenses", S.expenses.map(x => ({Date: x.date, Vertical: x.vertical, Category: x.category, "Paid To": x.vendor, "Supplier GSTIN": expGstin(x), "Bill Date": x.billDate || "", Description: x.desc, "Paid From": x.paidFrom, "Amount ₹ (incl. GST)": x.amount, "GST %": num(x.gst) * 100, "GST ₹": x.gstAmt, "Basic ₹": x.basic, "Linked Job": x.linked, "Bill No.": x.billNo, Notes: x.notes})));
   add("Clients", S.clients.map(c => ({Client: c.name, "Customer / Supplier": c.role || "Customer", "Billing Address": c.address, GSTIN: c.gstin, PAN: c.pan || "", "Place of Supply": c.pos, Contact: c.contact, Mobile: c.phone, Email: c.email, Type: c.type, Notes: c.notes})));
   add("Rate Card", S.ratecard.map(r => ({Item: r.item, Category: r.category, "HSN/SAC": r.hsn, Unit: r.unit, "Rate ₹": r.rate, "Cost ₹": r.cost ?? "", "GST %": num(r.gst) * 100, "Times Sold": r.sold, "Last Sold": r.lastSold, "Lowest ₹": r.low ?? "", "Highest ₹": r.high ?? ""})));
   add("Rate History", S.idx.lines.map(l => ({Date: l.date, Client: l.client, "Doc No.": l.no, Item: l.desc, HSN: l.hsn, Qty: l.qty, Unit: l.unit, "Rate ₹": l.rate, "Amount ₹": l.amount})));
